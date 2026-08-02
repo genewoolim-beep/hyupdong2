@@ -42,15 +42,30 @@ pip install "mediapipe<1.0" torch ultralytics openai pillow
 
 ### MediaPipe 모델 내려받기
 
-용량이 커서 저장소에 포함하지 않았다.
+용량이 커서 저장소에 포함하지 않았다. **`sign_demo.py` 와 같은 폴더**에 받는다.
 
 ```bash
-cd ~/Downloads
+cd sign_control
 wget https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
 wget https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task
 ```
 
-`sign_demo.py` 상단의 `HAND_TASK`, `POSE_TASK` 경로를 맞춰준다.
+### 경로·카메라 설정
+
+모든 경로는 스크립트 위치를 기준으로 잡히므로 clone 후 바로 실행된다.
+다른 곳에 두었다면 환경변수로 덮어쓴다.
+
+| 변수 | 기본값 | 용도 |
+|---|---|---|
+| `SIGN_MODELS` | `sign_demo.py` 가 있는 폴더 | `.task` 파일 위치 |
+| `SIGN_DATA` | `./sign_data` | 녹화 데이터 위치 |
+| `SIGN_CAM` | `1` | 카메라 인덱스 |
+
+```bash
+SIGN_CAM=0 SIGN_MODELS=~/models python3 sign_demo.py run
+```
+
+`ls /dev/video*` 로 카메라 번호를 확인할 수 있다.
 
 ---
 

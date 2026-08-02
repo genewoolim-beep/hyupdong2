@@ -23,12 +23,16 @@ import cv2
 import numpy as np
 
 # ───────────────────────── 설정 ─────────────────────────
-CAM_INDEX = 1                       # Logitech C270
+CAM_INDEX = int(os.environ.get("SIGN_CAM", 1))       # Logitech C270
 CAP_W, CAP_H = 1280, 720
 
-HAND_TASK = "/home/gene/Downloads/hand_landmarker.task"
-POSE_TASK = "/home/gene/Downloads/pose_landmarker_lite.task"
-DATA_DIR = "/home/gene/Downloads/sign_data"
+# 경로는 스크립트 위치를 기준으로 잡는다. 절대경로를 박아두면
+# 저장소를 clone 한 사람이 손대야 실행된다.
+HERE = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.environ.get("SIGN_MODELS", HERE)     # .task 파일을 둔 곳
+HAND_TASK = os.path.join(MODEL_DIR, "hand_landmarker.task")
+POSE_TASK = os.path.join(MODEL_DIR, "pose_landmarker_lite.task")
+DATA_DIR = os.environ.get("SIGN_DATA", os.path.join(HERE, "sign_data"))
 MODEL_PT = os.path.join(DATA_DIR, "model.pt")
 
 REC_FRAMES = 36                     # 녹화 길이. C270 실측 24fps 기준 약 1.5초
