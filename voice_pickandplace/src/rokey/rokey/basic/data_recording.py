@@ -42,7 +42,8 @@ def main(args=None):
     set_tool("Tool Weight_2FG")
     set_tcp("2FG_TCP")
 
-    source_path = "/home/rokey4090/ros2_ws/src/doosan-robot2/dsr_rokey/rokey/rokey/basic/data"
+    # 스크립트 옆 data/ 에 저장한다. 원본에는 작성자 홈경로가 박혀 있었다.
+    source_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     os.makedirs(source_path, exist_ok=True)
 
     cap = cv2.VideoCapture(4)

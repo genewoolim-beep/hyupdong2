@@ -45,7 +45,9 @@ IMGSZ = 640            # 추론 해상도
 IDLE_VEL = 0.02        # 관절 속도가 이보다 작으면 정지로 본다 (rad/s)
 DEBUG_WIDTH = 640      # RViz 로 보낼 영상 가로 크기 (원본 1280의 1/4 데이터)
 
-YOLO_MODEL = "/home/gene/Downloads/yolov8n.pt"
+# 파일명만 주면 ultralytics 가 없을 때 자동으로 내려받는다.
+# 다른 가중치를 쓰려면 YOLO_MODEL 환경변수로 경로를 넘긴다.
+YOLO_MODEL = os.environ.get("YOLO_MODEL", "yolov8n.pt")
 PERSON_CLASS = 0
 
 # m0609.urdf 의 revolute 조인트 origin (xyz[m], rpy[rad])

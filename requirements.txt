@@ -1,0 +1,33 @@
+# 두 프로젝트 공통 파이썬 의존성
+#   pip install -r requirements.txt
+#
+# ROS2 관련(rclpy, cv_bridge, sensor_msgs 등)은 apt 로 설치되는
+# ros-humble-* 패키지이므로 여기 없다.
+# Doosan 드라이버(DSR_ROBOT2, DR_init, dsr_msgs2)도 별도 워크스페이스다.
+
+# ── 반드시 이 버전 ───────────────────────────────
+numpy==1.26.4          # 2.x 는 cv_bridge 와 ABI 충돌 → import 직후 세그폴트
+mediapipe<1.0          # 1.x 는 numpy 2.x 를 끌어온다. 0.10.35 확인됨
+
+# ── 비전 ─────────────────────────────────────────
+opencv-python
+ultralytics            # YOLOv8
+torch                  # CUDA 버전은 pytorch.org 안내대로 별도 설치 권장
+pillow                 # 한글 텍스트 렌더링
+
+# ── 음성 ─────────────────────────────────────────
+openwakeword
+sounddevice
+pyaudio                # 시스템 패키지 필요: sudo apt install portaudio19-dev
+
+# ── LLM ──────────────────────────────────────────
+openai
+langchain-openai
+langchain-core
+python-dotenv
+
+# ── 로봇 ─────────────────────────────────────────
+pymodbus               # OnRobot RG2. 2.x/3.x 양쪽 대응됨
+
+# ── 기타 ─────────────────────────────────────────
+scipy
