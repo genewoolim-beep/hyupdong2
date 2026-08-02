@@ -39,12 +39,22 @@ Doosan M0609 협동로봇을 대상으로 한 프로젝트들. 각 폴더가 독
 
 ```
 Ubuntu 22.04 / ROS2 Humble
-Python 3.10, numpy 1.26.4      # 2.x 는 cv_bridge 와 충돌한다
-Doosan M0609 + OnRobot RG2
-Intel RealSense D435i
+Python 3.10
+Doosan M0609 + OnRobot RG2      # voice_pickandplace 만 해당
+Intel RealSense D435i           # voice_pickandplace 만 해당
+웹캠                             # sign_control
 ```
 
-별도로 Doosan 드라이버 워크스페이스(`dsr_msgs2`, `dsr_bringup2` 등)가 필요하다.
+```bash
+pip install -r requirements.txt
+```
+
+`numpy==1.26.4` 와 `mediapipe<1.0` 이 고정되어 있다. 이 둘을 놓치면
+`cv_bridge` 와 ABI 가 충돌해 import 직후 세그폴트가 난다.
+
+`voice_pickandplace` 는 별도로 Doosan 드라이버 워크스페이스
+(`dsr_msgs2`, `dsr_bringup2` 등)와 `ros-humble-realsense2-camera` 가 필요하다.
+`sign_control` 은 웹캠만 있으면 된다.
 
 ## API 키
 

@@ -52,11 +52,31 @@ Intel RealSense D435i
 ## 설치
 
 ```bash
-git clone <이 저장소> ~/pnp_ws
-cd ~/pnp_ws
+git clone https://github.com/genewoolim-beep/hyupdong2.git
+cd hyupdong2
+pip install -r requirements.txt        # numpy 1.26.4 고정이 중요하다
+
+cd voice_pickandplace
 colcon build --symlink-install
 source install/setup.bash
 ```
+
+> `colcon build` 는 반드시 `voice_pickandplace/` 안에서 실행한다.
+> 저장소 최상위에서 돌리면 `build/` `install/` 이 루트에 생긴다.
+
+Doosan 드라이버 워크스페이스를 **먼저** 소싱해야 `dsr_msgs2` 가 잡힌다.
+
+```bash
+source ~/<doosan_ws>/install/setup.bash
+```
+
+### 환경변수
+
+| 변수 | 기본값 | 용도 |
+|---|---|---|
+| `YOLO_MODEL` | `yolov8n.pt` | `person_tracker` 가 쓸 가중치. 없으면 자동으로 내려받는다 |
+| `ROS_DOMAIN_ID` | — | 노드끼리 맞춰야 한다 |
+| `RMW_IMPLEMENTATION` | — | 전 노드가 동일해야 한다 |
 
 ### API 키 설정
 
