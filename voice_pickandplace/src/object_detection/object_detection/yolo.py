@@ -9,6 +9,8 @@ from ament_index_python.packages import get_package_share_directory
 from ultralytics import YOLO
 import numpy as np
 
+from object_detection.detection_utils import iou
+
 
 PACKAGE_NAME = "object_detection"
 PACKAGE_PATH = get_package_share_directory(PACKAGE_NAME)
@@ -42,16 +44,17 @@ class YoloModel:
             time.sleep(0.01)
 
         if not frames:
-            print("No frames captured in %.2f seconds", duration)
+            print(f"No frames captured in {duration:.2f} seconds")
 
-        print("%d frames captured", len(frames))
+        print(f"{len(frames)} frames captured")
         return list(frames.values())
 
     def get_best_detection(self, img_node, target):
         rclpy.spin_once(img_node)
         frames = self.get_frames(img_node)
-        if not frames:  # Check if frames are empty
-            return None
+        if not frames:
+            # 호출자가 (box, score) 두 개로 받으므로 여기서도 반드시 두 개를 반환해야 한다
+            return None, None
 
         results = self.model(frames, verbose=False)
         print("classes: ")
@@ -96,7 +99,7 @@ class YoloModel:
             used[i] = True
             for j, other in enumerate(raw):
                 if not used[j] and other["label"] == det["label"]:
-                    if self._iou(det["box"], other["box"]) >= iou_threshold:
+                    if iou(det["box"], other["box"]) >= iou_threshold:
                         group.append(other)
                         used[j] = True
 
@@ -113,15 +116,3 @@ class YoloModel:
             )
 
         return final
-
-    def _iou(self, box1, box2):
-        """
-        Compute Intersection over Union (IoU) between two boxes [x1, y1, x2, y2].
-        """
-        x1, y1 = max(box1[0], box2[0]), max(box1[1], box2[1])
-        x2, y2 = min(box1[2], box2[2]), min(box1[3], box2[3])
-        inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-        union = area1 + area2 - inter
-        return inter / union if union > 0 else 0.0

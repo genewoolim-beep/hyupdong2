@@ -3,6 +3,16 @@ from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
 
 
+def _stamp_ns(msg):
+    """ROS 시각을 나노초 정수로 바꾼다.
+
+    sec 와 nanosec 를 문자열로 이어 붙이면 크기를 비교할 수 없고,
+    (sec=100, nsec=5) 와 (sec=10, nsec=05) 가 똑같이 "1005" 가 되어 구분도 안 된다.
+    """
+    stamp = msg.header.stamp
+    return stamp.sec * 1_000_000_000 + stamp.nanosec
+
+
 class ImgNode(Node):
     def __init__(self):
         super().__init__('img_node')
@@ -10,6 +20,7 @@ class ImgNode(Node):
         self.color_frame = None
         self.color_frame_stamp = None
         self.depth_frame = None
+        self.depth_frame_stamp = None
         self.intrinsics = None
         self.color_subscription = self.create_subscription(
             Image, '/camera/camera/color/image_raw', self.color_callback, 10)
@@ -24,10 +35,11 @@ class ImgNode(Node):
 
     def color_callback(self, msg):
         self.color_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        self.color_frame_stamp = str(msg.header.stamp.sec) + str(msg.header.stamp.nanosec)
+        self.color_frame_stamp = _stamp_ns(msg)
 
     def depth_callback(self, msg):
         self.depth_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+        self.depth_frame_stamp = _stamp_ns(msg)
 
     def get_color_frame(self):
         return self.color_frame
@@ -37,6 +49,9 @@ class ImgNode(Node):
 
     def get_depth_frame(self):
         return self.depth_frame
+
+    def get_depth_frame_stamp(self):
+        return self.depth_frame_stamp
 
     def get_camera_intrinsic(self):
         return self.intrinsics

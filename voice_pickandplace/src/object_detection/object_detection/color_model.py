@@ -1,35 +1,51 @@
 ########## ColorModel ##########
 # YOLO 없이, 색깔만으로 물체 하나를 찾는다.
+#
+# HSV 범위와 튜닝 값은 코드가 아니라 resource/color_ranges.json 에 있다.
+# 조명이 바뀔 때마다 다시 빌드하지 않고 그 파일만 고쳐서 대응하기 위해서다.
+import json
+import os
+
 import cv2
 import numpy as np
-import rclpy
+from ament_index_python.packages import get_package_share_directory
 
-# OpenCV의 Hue는 0~179 범위. 채도(S)·명도(V) 하한을 둬서 회색/흰색/검정/나무 배경을 제외한다.
-# 배경(나무판·체스보드)이 낮은 채도로도 걸리는 걸 막기 위해 기준을 다소 엄격하게 잡는다.
-_S_MIN, _V_MIN = 100, 60
+from object_detection.detection_utils import collect_frames, consensus_box
 
-COLOR_HSV_RANGES = {
-    "빨간색": [((0, _S_MIN, _V_MIN), (8, 255, 255)), ((172, _S_MIN, _V_MIN), (179, 255, 255))],
-    "red": [((0, _S_MIN, _V_MIN), (8, 255, 255)), ((172, _S_MIN, _V_MIN), (179, 255, 255))],
-    "주황색": [((9, _S_MIN, _V_MIN), (20, 255, 255))],
-    "orange": [((9, _S_MIN, _V_MIN), (20, 255, 255))],
-    "노란색": [((21, _S_MIN, _V_MIN), (33, 255, 255))],
-    "yellow": [((21, _S_MIN, _V_MIN), (33, 255, 255))],
-    "초록색": [((34, _S_MIN, _V_MIN), (85, 255, 255))],
-    "green": [((34, _S_MIN, _V_MIN), (85, 255, 255))],
-    "파란색": [((86, _S_MIN, _V_MIN), (130, 255, 255))],
-    "blue": [((86, _S_MIN, _V_MIN), (130, 255, 255))],
-    # 보라색: hsv_probe로 실측해보니 이 블록은 조명 때문에 hue가 파란색과 같은 대역(86~130)에
-    # 찍히고, 채도만 파란 블록보다 낮다. 그래서 hue가 아니라 "파란색 hue대 + 낮은 채도"로 구분한다.
-    # V 상한을 둬서 흰색/회색 물체의 밝은 반사광(하이라이트)까지 걸리는 걸 막는다.
-    "보라색": [((86, 45, 40), (130, 95, 200))],
-    "purple": [((86, 45, 40), (130, 95, 200))],
-}
+PACKAGE_NAME = 'object_detection'
+CONFIG_PATH = os.path.join(
+    get_package_share_directory(PACKAGE_NAME), 'resource', 'color_ranges.json'
+)
 
-MIN_AREA = 800  # 이보다 작은 뭉치는 노이즈로 보고 무시한다
-MAX_AREA_RATIO = 0.35  # 화면의 이 비율보다 큰 뭉치는 배경 오탐으로 보고 무시한다
-MAX_ASPECT_RATIO = 2.2  # 블록은 위에서 보면 거의 정사각형이라, 가로/세로 비율이 이보다 길쭉하면
-                         # 옆에 붙어있는 다른 블록까지 합쳐진 것으로 보고 제외한다
+
+def _load_config(path):
+    """색 범위 정의를 읽어 cv2.inRange 가 바로 쓸 수 있는 형태로 바꾼다."""
+    with open(path, encoding='utf-8') as f:
+        spec = json.load(f)
+
+    ranges = {}
+    for name, entry in spec['colors'].items():
+        bands = [
+            ((r['h'][0], r['s'][0], r['v'][0]), (r['h'][1], r['s'][1], r['v'][1]))
+            for r in entry['ranges']
+        ]
+        ranges[name] = bands
+        if entry.get('en'):
+            # 같은 리스트를 가리키게 해서, 위 값만 고치면 영어 이름에도 그대로 반영되게 한다
+            ranges[entry['en']] = bands
+
+    return ranges, spec['filters'], spec['frames']
+
+
+COLOR_HSV_RANGES, _FILTERS, _FRAMES = _load_config(CONFIG_PATH)
+
+MIN_AREA = _FILTERS['min_area']
+MAX_AREA_RATIO = _FILTERS['max_area_ratio']
+MAX_ASPECT_RATIO = _FILTERS['max_aspect_ratio']
+
+FRAME_DURATION = _FRAMES['duration_sec']
+IOU_THRESHOLD = _FRAMES['iou_threshold']
+MIN_HIT_RATIO = _FRAMES['min_hit_ratio']
 
 
 def block_candidates(contours, max_area):
@@ -51,6 +67,37 @@ def block_candidates(contours, max_area):
     return candidates
 
 
+def detect_color_box(hsv, ranges, max_area):
+    """HSV 이미지 한 장에서 그 색의 블록 하나를 찾아 (박스, 통계) 를 돌려준다.
+
+    ColorModel 과 color_view 가 같은 결과를 보도록 검출 과정을 여기 한 곳에 둔다.
+    함께 돌려주는 통계는 못 찾았을 때 그 이유를 로그로 남기기 위한 것이다.
+    """
+    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+    for lo, hi in ranges:
+        mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
+    raw_pixels = int(cv2.countNonZero(mask))
+
+    # 작은 점 노이즈는 지운다 (open). 닫기(close)는 너무 크게 하면 옆에 붙은
+    # 다른 블록까지 하나로 합쳐버리므로 작은 커널만 살짝 적용한다.
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    stats = {
+        'raw_pixels': raw_pixels,
+        'areas': sorted((cv2.contourArea(c) for c in contours), reverse=True),
+    }
+
+    candidates = block_candidates(contours, max_area)
+    if not candidates:
+        return None, stats
+
+    best = max(candidates, key=cv2.contourArea)
+    x, y, w, h = cv2.boundingRect(best)
+    return [float(x), float(y), float(x + w), float(y + h)], stats
+
+
 class ColorModel:
     def get_best_detection(self, img_node, target):
         key = target.strip().lower()
@@ -59,39 +106,24 @@ class ColorModel:
             print(f"'{target}' is not a known color. known: {sorted(set(COLOR_HSV_RANGES))}")
             return None, None
 
-        frame = self._wait_for_frame(img_node)
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
-        mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
-        for lo, hi in ranges:
-            mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
-
-        # 작은 점 노이즈는 지운다 (open). 닫기(close)는 너무 크게 하면 옆에 붙은
-        # 다른 블록까지 하나로 합쳐버리므로 작은 커널만 살짝 적용한다.
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        frame_area = hsv.shape[0] * hsv.shape[1]
-        max_area = frame_area * MAX_AREA_RATIO
-
-        # 배경 오탐과 다른 블록과 합쳐진 뭉치를 걸러내고, 남은 것 중 가장 큰 걸 고른다
-        candidates = block_candidates(contours, max_area)
-        if not candidates:
-            print(f"No plausible-sized '{target}' colored object found.")
+        # 한 장만 보면 그 순간의 그림자나 반사광에 그대로 속는다.
+        # 짧게 여러 장을 모아서 매번 같은 자리에 나오는 것만 인정한다.
+        frames = collect_frames(img_node, FRAME_DURATION)
+        if not frames:
+            print("No frames captured from the camera.")
             return None, None
 
-        best = max(candidates, key=cv2.contourArea)
-        area = cv2.contourArea(best)
+        boxes = []
+        for frame in frames:
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            max_area = hsv.shape[0] * hsv.shape[1] * MAX_AREA_RATIO
+            box, _ = detect_color_box(hsv, ranges, max_area)
+            if box is not None:
+                boxes.append(box)
 
-        x, y, w, h = cv2.boundingRect(best)
-        box = [float(x), float(y), float(x + w), float(y + h)]
-        score = float(area) / frame_area
-        return box, score
+        box, hit_ratio = consensus_box(boxes, len(frames), IOU_THRESHOLD, MIN_HIT_RATIO)
+        if box is None:
+            print(f"'{target}' was not seen consistently across {len(frames)} frames.")
+            return None, None
 
-    def _wait_for_frame(self, img_node):
-        frame = img_node.get_color_frame()
-        while frame is None:
-            rclpy.spin_once(img_node)
-            frame = img_node.get_color_frame()
-        return frame
+        return box, hit_ratio

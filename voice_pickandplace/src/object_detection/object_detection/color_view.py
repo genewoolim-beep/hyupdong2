@@ -8,11 +8,17 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 from PIL import Image as PILImage, ImageDraw, ImageFont
 
-from object_detection.color_model import COLOR_HSV_RANGES, MIN_AREA, MAX_AREA_RATIO, block_candidates
+from object_detection.color_model import (
+    COLOR_HSV_RANGES, MIN_AREA, MAX_AREA_RATIO, detect_color_box,
+)
+from object_detection.detection_utils import iou
 
 # OpenCV의 cv2.putText는 한글을 못 그리므로, 한글 지원 폰트로 PIL을 이용해 그린다
 FONT_PATH = '/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf'
 FONT_SIZE = 30
+
+# 서로 다른 색의 박스가 이만큼 겹치면 두 색의 HSV 범위가 겹쳤다는 신호로 본다
+OVERLAP_WARN_IOU = 0.15
 
 # 화면에 그릴 때 쓸 대표색 (BGR)
 DISPLAY_COLOR = {
@@ -40,31 +46,22 @@ class ColorView(Node):
     def on_image(self, msg):
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        kernel = np.ones((5, 5), np.uint8)
-        close_kernel = np.ones((3, 3), np.uint8)
         max_area = frame.shape[0] * frame.shape[1] * MAX_AREA_RATIO
 
-        labels = []  # 한글 라벨은 모아뒀다가 PIL로 한번에 그린다
+        found = []    # 겹침 검사용 (색이름, 박스)
+        labels = []   # 한글 라벨은 모아뒀다가 PIL로 한번에 그린다
         for name, color_bgr in DISPLAY_COLOR.items():
-            mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
-            for lo, hi in COLOR_HSV_RANGES[name]:
-                mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
-            raw_pixels = int(cv2.countNonZero(mask))
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
-
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            areas = sorted((cv2.contourArea(c) for c in contours), reverse=True)
-            self._log_detection_reason(name, raw_pixels, areas, max_area)
-
-            candidates = block_candidates(contours, max_area)
-            if not candidates:
+            box, stats = detect_color_box(hsv, COLOR_HSV_RANGES[name], max_area)
+            self._log_detection_reason(name, stats, max_area)
+            if box is None:
                 continue
-            best = max(candidates, key=cv2.contourArea)
 
-            x, y, w, h = cv2.boundingRect(best)
-            cv2.rectangle(frame, (x, y), (x + w, y + h), color_bgr, 3)
-            labels.append((x, max(y - (FONT_SIZE + 10), 0), name, color_bgr))
+            found.append((name, box))
+            x1, y1, x2, y2 = (int(v) for v in box)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color_bgr, 3)
+            labels.append((x1, max(y1 - (FONT_SIZE + 10), 0), name, color_bgr))
+
+        self._warn_on_overlap(found)
 
         if labels:
             frame = self._draw_korean_labels(frame, labels)
@@ -73,8 +70,9 @@ class ColorView(Node):
         out_msg.header = msg.header
         self.pub.publish(out_msg)
 
-    def _log_detection_reason(self, name, raw_pixels, areas, max_area):
+    def _log_detection_reason(self, name, stats, max_area):
         """색이 왜 안 잡혔는지(혹은 잡혔는지) 원인을 구분해서 5초에 한 번 정도 로그로 남긴다."""
+        raw_pixels, areas = stats['raw_pixels'], stats['areas']
         if raw_pixels == 0:
             reason = "해당 색 픽셀이 화면에 아예 없음 (HSV 범위 밖)"
         elif not areas:
@@ -86,6 +84,22 @@ class ColorView(Node):
         else:
             reason = f"정상 인식됨 (area={areas[0]:.0f})"
         self.get_logger().info(f"[{name}] {reason}", throttle_duration_sec=5)
+
+    def _warn_on_overlap(self, found):
+        """서로 다른 색이 같은 자리를 물고 있으면 알린다.
+
+        블록은 겹쳐 놓지 않는 한 서로 다른 자리에 있어야 하므로, 박스가 겹친다면
+        두 색의 HSV 범위가 겹쳐서 한쪽이 다른 쪽 블록까지 잡고 있다는 뜻이다.
+        """
+        for i, (name_a, box_a) in enumerate(found):
+            for name_b, box_b in found[i + 1:]:
+                overlap = iou(box_a, box_b)
+                if overlap >= OVERLAP_WARN_IOU:
+                    self.get_logger().warn(
+                        f"[{name_a}] 와 [{name_b}] 박스가 {overlap:.0%} 겹칩니다. "
+                        f"두 색의 HSV 범위가 겹쳤을 수 있습니다 (hsv_probe 로 확인).",
+                        throttle_duration_sec=5,
+                    )
 
     def _draw_korean_labels(self, frame, labels):
         pil_img = PILImage.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))

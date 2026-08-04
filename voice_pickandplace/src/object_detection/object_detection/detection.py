@@ -1,17 +1,16 @@
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from typing import Any, Callable, Optional, Tuple
 
-from ament_index_python.packages import get_package_share_directory
 from od_msg.srv import SrvDepthPosition
 from object_detection.realsense import ImgNode
 from object_detection.yolo import YoloModel
 from object_detection.color_model import ColorModel
 
-
-PACKAGE_NAME = 'object_detection'
-PACKAGE_PATH = get_package_share_directory(PACKAGE_NAME)
+# 검출에 쓴 컬러 프레임과 거리를 읽을 깊이 프레임이 이만큼 이상 벌어지면 다시 기다린다.
+# 두 프레임이 서로 다른 순간의 것이면, 물체나 팔이 움직이는 동안 엉뚱한 거리를 읽게 된다.
+MAX_SYNC_GAP_NS = 100_000_000   # 0.1초
+MAX_SYNC_RETRY = 10
 
 
 class ObjectDetectionNode(Node):
@@ -65,12 +64,34 @@ class ObjectDetectionNode(Node):
 
     def _get_depth(self, x, y):
         """픽셀 좌표의 depth 값을 안전하게 읽어옵니다."""
-        frame = self._wait_for_valid_data(self.img_node.get_depth_frame, "depth frame")
+        frame = self._wait_for_synced_depth()
         try:
             return frame[y, x]
         except IndexError:
             self.get_logger().warn(f"Coordinates ({x},{y}) out of range.")
             return None
+
+    def _wait_for_synced_depth(self):
+        """검출에 쓴 컬러 프레임과 촬영 시각이 가까운 깊이 프레임을 기다립니다."""
+        color_ns = self.img_node.get_color_frame_stamp()
+        gap = None
+
+        for _ in range(MAX_SYNC_RETRY):
+            frame = self._wait_for_valid_data(self.img_node.get_depth_frame, "depth frame")
+            depth_ns = self.img_node.get_depth_frame_stamp()
+            if color_ns is None or depth_ns is None:
+                return frame
+
+            gap = abs(color_ns - depth_ns)
+            if gap <= MAX_SYNC_GAP_NS:
+                return frame
+            rclpy.spin_once(self.img_node)
+
+        # 계속 안 맞으면 멈춰 서는 것보다 최신 프레임으로 진행하되, 어긋난 정도는 남긴다
+        self.get_logger().warn(
+            f"컬러/깊이 프레임 시각이 {gap / 1e6:.0f}ms 벌어진 채로 거리 계산을 진행합니다."
+        )
+        return frame
 
     def _wait_for_valid_data(self, getter, description):
         """getter 함수가 유효한 데이터를 반환할 때까지 spin 하며 재시도합니다."""
