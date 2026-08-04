@@ -51,16 +51,20 @@ class ObjectDetectionNode(Node):
         box, score = self.model.get_best_detection(self.img_node, target)
         if box is None or score is None:
             self.get_logger().warn("No detection found.")
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0
         
         self.get_logger().info(f"Detection: box={box}, score={score}")
         cx, cy = map(int, [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2])
         cz = self._get_depth(cx, cy)
         if cz is None:
             self.get_logger().warn("Depth out of range.")
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0
 
-        return self._pixel_to_camera_coords(cx, cy, cz)
+        x, y, z = self._pixel_to_camera_coords(cx, cy, cz)
+        # 색 모델이면 회전각도 함께 돌려준다. 기울어진 정사각 블록을 고정
+        # 각도로 물면 모서리만 잡혀 조일 때 돌아간다. YOLO 는 각도가 없어 0.
+        ang = float(getattr(self.model, 'last_angle', 0.0))
+        return x, y, z, ang
 
     def _get_depth(self, x, y):
         """픽셀 좌표의 depth 값을 안전하게 읽어옵니다."""
