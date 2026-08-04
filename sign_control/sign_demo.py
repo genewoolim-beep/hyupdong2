@@ -23,7 +23,7 @@ import cv2
 import numpy as np
 
 # ───────────────────────── 설정 ─────────────────────────
-CAM_INDEX = int(os.environ.get("SIGN_CAM", 1))       # Logitech C270
+CAM_INDEX = int(os.environ.get("SIGN_CAM", 0))       # LG Camera (video1은 메타데이터 전용이라 열리지 않음)
 CAP_W, CAP_H = 1280, 720
 
 # 경로는 스크립트 위치를 기준으로 잡는다. 절대경로를 박아두면

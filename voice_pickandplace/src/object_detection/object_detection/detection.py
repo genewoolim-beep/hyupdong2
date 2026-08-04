@@ -7,6 +7,7 @@ from ament_index_python.packages import get_package_share_directory
 from od_msg.srv import SrvDepthPosition
 from object_detection.realsense import ImgNode
 from object_detection.yolo import YoloModel
+from object_detection.color_model import ColorModel
 
 
 PACKAGE_NAME = 'object_detection'
@@ -14,7 +15,7 @@ PACKAGE_PATH = get_package_share_directory(PACKAGE_NAME)
 
 
 class ObjectDetectionNode(Node):
-    def __init__(self, model_name = 'yolo'):
+    def __init__(self, model_name = 'color'):
         super().__init__('object_detection_node')
         self.img_node = ImgNode()
         self.model = self._load_model(model_name)
@@ -30,8 +31,11 @@ class ObjectDetectionNode(Node):
 
     def _load_model(self, name):
         """모델 이름에 따라 인스턴스를 반환합니다."""
-        if name.lower() == 'yolo':
+        name = name.lower()
+        if name == 'yolo':
             return YoloModel()
+        if name == 'color':
+            return ColorModel()
         raise ValueError(f"Unsupported model: {name}")
 
     def handle_get_depth(self, request, response):

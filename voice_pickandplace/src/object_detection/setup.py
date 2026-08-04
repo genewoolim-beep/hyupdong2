@@ -22,6 +22,8 @@ setup(
     entry_points={
         'console_scripts': [
             'object_detection = object_detection.detection:main',
+            'color_view = object_detection.color_view:main',
+            'hsv_probe = object_detection.hsv_probe:main',
         ],
     },
 )
