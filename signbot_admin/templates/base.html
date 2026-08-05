@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}SignBot Control{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <div class="navbar">
+    <div class="brand">SignBot Control</div>
+    <div class="nav-right">
+      <div class="status-pill{{ '' if robot.connected else ' offline' }}" id="robotStatusPill">
+        <span class="dot"></span>
+        <span id="robotStatusText">{{ '로봇 연결됨' if robot.connected else '로봇 연결 끊김' }}</span>
+      </div>
+      <div class="user-tag">관리자 유용준</div>
+    </div>
+  </div>
+
+  <div class="main-area">
+    {% block content %}{% endblock %}
+  </div>
+
+  <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

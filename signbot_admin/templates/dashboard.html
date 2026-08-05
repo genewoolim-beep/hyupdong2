@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}대시보드 · SignBot Control{% endblock %}
+{% block content %}
+{% macro zone_cards(zones) %}
+{% for z in zones %}
+<div class="zone-card">
+  <div class="zone-name">{{ z.zone }}</div>
+  {% if z.color %}
+  <div class="zone-swatch" style="background:{{ z.color_hex }}"></div>
+  <div class="zone-color-label">{{ z.color }}</div>
+  {% else %}
+  <div class="zone-swatch zone-empty"></div>
+  <div class="zone-color-label zone-empty-label">비어있음</div>
+  {% endif %}
+</div>
+{% endfor %}
+{% endmacro %}
+<h1 class="page-title">통합 대시보드</h1>
+
+<div class="stats-row">
+  <div class="stat-card">
+    <div class="stat-bar" style="background:#336BF2"></div>
+    <div class="stat-label">연결된 로봇</div>
+    <div class="stat-value" id="statConnectedRobots">{{ stats.connected_robots }}대</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-bar" style="background:#2199C4"></div>
+    <div class="stat-label">오늘 인식 횟수</div>
+    <div class="stat-value" id="statTodayCount">{{ "{:,}".format(stats.today_count) }}회</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-bar" style="background:#21C478"></div>
+    <div class="stat-label">인식 성공률</div>
+    <div class="stat-value" id="statSuccessRate">{{ stats.success_rate }}%</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-bar" style="background:#ED6B33"></div>
+    <div class="stat-label">활성 알람</div>
+    <div class="stat-value" id="statAlerts">{{ stats.active_alerts }}건</div>
+  </div>
+</div>
+
+<div class="mid-row">
+  <div class="panel camera-panel">
+    <div class="panel-title">실시간 카메라 · 수어 인식</div>
+    <div class="video-feed">
+      <img id="videoFeed" src="{{ url_for('video_feed') }}" alt="RealSense 영상 스트림" onerror="this.style.display='none'; document.getElementById('videoPlaceholderText').style.display='block';">
+      <span id="videoPlaceholderText" class="video-placeholder-text">RealSense 영상 스트림</span>
+    </div>
+    <div class="recog-row">
+      <span class="recog-label">인식된 수어:</span>
+      <span class="recog-value" id="recogValue">
+        {% if latest %}"{{ latest.sign }}" (신뢰도 {{ latest.confidence }}){% else %}대기 중{% endif %}
+      </span>
+    </div>
+
+    <div class="sentence-block">
+      <div class="sentence-header">
+        <span class="recog-label">인식 중인 문장</span>
+        {% set status_label = {"idle": "대기 중", "building": "문장 구성 중…", "translated": "통역 완료"} %}
+        <span class="sentence-status status-{{ sentence.status }}" id="sentenceStatus">{{ status_label.get(sentence.status, sentence.status) }}</span>
+      </div>
+      <div class="sentence-words" id="sentenceWords">
+        {% if sentence.words or sentence.live_word %}
+          {% for w in sentence.words %}<span class="word-chip">{{ w }}</span>{% endfor %}
+          {% if sentence.live_word %}<span class="word-chip word-chip-pending">{{ sentence.live_word }}</span>{% endif %}
+        {% else %}
+          <span class="sentence-placeholder">아직 인식된 단어가 없습니다</span>
+        {% endif %}
+      </div>
+      <div class="sentence-translated" id="sentenceTranslated" style="display:{{ 'block' if sentence.translated else 'none' }};">{{ '"%s"' % sentence.translated if sentence.translated else '' }}</div>
+    </div>
+  </div>
+
+  <div class="panel robot-panel">
+    <div class="panel-title">로봇 상태 · 제어</div>
+    <div class="status-row"><span>연결 상태</span><span id="statConn">{{ '정상 · ' + robot.model if robot.connected else '연결 끊김' }}</span></div>
+    <div class="status-row"><span>현재 모드</span><span id="statMode">{{ robot.mode }}</span></div>
+    <div class="status-row"><span>마지막 명령</span><span id="statLastCmd">{{ robot.last_command }}</span></div>
+    <div class="status-row"><span>배터리 / 전원</span><span>{{ robot.power }}</span></div>
+    <div class="control-buttons">
+      <button class="btn btn-secondary" id="btnPause">일시정지</button>
+      <button class="btn btn-secondary" id="btnResume">재개</button>
+      <button class="btn btn-danger" id="btnEStop">비상정지</button>
+    </div>
+
+    <div class="debug-block">
+      <div class="panel-title" style="font-size:14px;">디버그 로그</div>
+      <div class="debug-log" id="debugLog">
+        {% if debug_logs %}
+          {% for d in debug_logs %}
+          <div class="debug-entry level-{{ d.level }}">
+            <span class="debug-time">{{ d.time }}</span>
+            <span class="debug-source">[{{ d.source }}]</span>
+            <span class="debug-message">{{ d.message }}</span>
+          </div>
+          {% endfor %}
+        {% else %}
+          <span class="sentence-placeholder">오류/디버그 메시지가 여기 표시됩니다</span>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="zone-row">
+  <div class="panel zone-panel">
+    <div class="panel-title">로봇 구역 현황</div>
+    <div class="zone-grid" id="zoneGridRobot">{{ zone_cards(robot_zones) }}</div>
+  </div>
+  <div class="panel zone-panel">
+    <div class="panel-title">인간 구역 현황</div>
+    <div class="zone-grid" id="zoneGridHuman">{{ zone_cards(human_zones) }}</div>
+  </div>
+</div>
+
+<div class="panel log-panel">
+  <div class="panel-title">인식 로그 · 이력</div>
+  <table class="log-table">
+    <thead>
+      <tr><th>시간</th><th>인식된 수어</th><th>신뢰도</th><th>전송 명령</th><th>결과</th></tr>
+    </thead>
+    <tbody id="logTableBody">
+      {% for log in logs %}
+      <tr>
+        <td>{{ log.time }}</td>
+        <td>{{ log.sign }}</td>
+        <td>{{ log.confidence }}</td>
+        <td>{{ log.command }}</td>
+        <td class="{{ 'result-success' if log.result == '성공' else 'result-fail' }}">{{ log.result }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // 5초마다 상태/로그 폴링 (실제 환경에서는 WebSocket/SocketIO로 교체 권장)
+  document.addEventListener('DOMContentLoaded', () => {
+    if (window.SignBotDashboard) window.SignBotDashboard.startPolling();
+  });
+</script>
+{% endblock %}

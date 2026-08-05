@@ -1,0 +1,353 @@
+"""
+SignBot Control - 수어 인식 로봇 제어 관리자 대시보드
+Flask 기반 관리자 UI 백엔드
+"""
+from datetime import datetime
+import random
+import threading
+import time
+
+from flask import Flask, render_template, jsonify, request, Response
+
+app = Flask(__name__)
+
+# ---------------------------------------------------------------------------
+# 목(mock) 데이터 - 실제 연동 전 UI 확인용. 아래 함수들을 ROS2 노드/DB 연동으로 교체하세요.
+# ---------------------------------------------------------------------------
+
+SIGN_LABELS = ["앞으로 이동", "정지", "왼쪽으로 회전", "오른쪽으로 회전", "알 수 없음"]
+COMMAND_MAP = {
+    "앞으로 이동": "MOVE_FORWARD",
+    "정지": "STOP",
+    "왼쪽으로 회전": "TURN_LEFT",
+    "오른쪽으로 회전": "TURN_RIGHT",
+    "알 수 없음": "-",
+}
+
+# 실제 인식 이벤트로 채워진다 (sign_demo.py --admin 이 POST /api/recognize 로 기록).
+# 서버 재시작 시 초기화되고 별도 저장소가 없으므로, "오늘"은 사실상 "이 서버 프로세스가
+# 떠 있는 동안"을 뜻한다.
+recognition_logs = []
+
+# block_sort.py --admin 이 POST /api/robot/status 로 실제 값을 보고하기 전까지의 초기 상태.
+# 지금은 로봇 제어 프로세스가 아무것도 안 떠 있으므로 connected: False 가 사실과 맞다.
+robot_state = {
+    "connected": False,
+    "model": "Doosan M0609",
+    "mode": "-",
+    "last_command": "-",
+    "power": "-",
+    "e_stop": False,
+}
+
+COLOR_HEX = {
+    "빨강": "#DE3D3D",
+    "주황": "#ED6B33",
+    "노랑": "#F2B705",
+    "초록": "#21C478",
+    "파랑": "#336BF2",
+    "보라": "#8B5CF6",
+}
+
+# 구역별 현재 컬러 블록 상태. color가 None이면 빈 구역.
+# 물리적 제약으로 5·6번구역은 운용하지 않기로 함 — 1~4번구역만 2x2로 표시.
+# 공간이 둘로 나뉜다: 로봇 존(로봇이 물건을 놓는 공간) / 휴먼 존(사람이 참고용 물건을 놓는 공간).
+# "똑같이" · "좌우대칭" 명령은 휴먼 존 상태를 참고해서 로봇 존에 명령을 내리는 데 쓰인다.
+# 실제 연동 시 오브젝트 디텍션 노드가 구역을 인식할 때마다 POST /api/zones/<robot|human> 로 갱신하세요.
+robot_zone_state = {
+    "1번구역": {"color": None, "updated_at": "-"},
+    "2번구역": {"color": None, "updated_at": "-"},
+    "3번구역": {"color": None, "updated_at": "-"},
+    "4번구역": {"color": None, "updated_at": "-"},
+}
+human_zone_state = {
+    "1번구역": {"color": None, "updated_at": "-"},
+    "2번구역": {"color": None, "updated_at": "-"},
+    "3번구역": {"color": None, "updated_at": "-"},
+    "4번구역": {"color": None, "updated_at": "-"},
+}
+ZONE_SPACES = {"robot": robot_zone_state, "human": human_zone_state}
+
+# 수어 인식 중 실시간으로 쌓이는 단어(글로스) 시퀀스.
+# status: idle(대기) / building(구성 중) / translated(LLM 통역 완료)
+# live_word: 아직 확정 전, 지금 손을 들고 있는 동안의 실시간 추정 단어(있으면 즉시 사용자에게 피드백용)
+# 실제 연동 시 sign_control 노드가 단어를 인식할 때마다 POST /api/sentence 로 append 하세요.
+current_sentence = {
+    "words": [],
+    "live_word": "",
+    "status": "idle",
+    "translated": None,
+    "updated_at": "14:32:15",
+}
+
+# 디버깅용 오류/이벤트 로그. 로봇 상태 · 제어 패널 하단에 표시된다.
+# 실제 연동 시 로봇 제어 노드, LLM 호출, ROS2 브리지 등에서 문제가 생기면
+# POST /api/debug 로 기록하세요. level: info / warn / error
+debug_logs = []
+
+
+def get_zone_list(state):
+    return [
+        {
+            "zone": zone,
+            "color": info["color"],
+            "color_hex": COLOR_HEX.get(info["color"]),
+            "updated_at": info["updated_at"],
+        }
+        for zone, info in state.items()
+    ]
+
+
+def get_stats():
+    total = len(recognition_logs)
+    success = len([l for l in recognition_logs if l["result"] == "성공"])
+    # 알람 = 실제 로봇 상태 이상 신호 — 비상정지가 걸려 있거나 로봇 연결이 끊겼을 때.
+    alerts = (1 if robot_state["e_stop"] else 0) + (0 if robot_state["connected"] else 1)
+    return {
+        "connected_robots": 1 if robot_state["connected"] else 0,
+        "today_count": total,
+        "success_rate": round(success / total * 100, 1) if total else 0,
+        "active_alerts": alerts,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 페이지 라우트
+# ---------------------------------------------------------------------------
+
+@app.route("/")
+def dashboard():
+    return render_template(
+        "dashboard.html",
+        stats=get_stats(),
+        robot=robot_state,
+        latest=recognition_logs[0] if recognition_logs else None,
+        logs=recognition_logs[:5],
+        robot_zones=get_zone_list(robot_zone_state),
+        human_zones=get_zone_list(human_zone_state),
+        sentence=current_sentence,
+        debug_logs=debug_logs[:20],
+    )
+
+
+# ---------------------------------------------------------------------------
+# API 라우트 (프런트에서 fetch로 폴링/제어) - 실제 로봇/비전 파이프라인과 연결 지점
+# ---------------------------------------------------------------------------
+
+@app.route("/api/status")
+def api_status():
+    """대시보드 상단 상태/통계 폴링용"""
+    return jsonify({"robot": robot_state, "stats": get_stats()})
+
+
+@app.route("/api/logs")
+def api_logs():
+    return jsonify(recognition_logs)
+
+
+@app.route("/api/zones/<space>")
+def api_zones(space):
+    """대시보드 '로봇/인간 구역 현황' 패널 폴링용. space: robot | human"""
+    state = ZONE_SPACES.get(space)
+    if state is None:
+        return jsonify({"error": f"unknown zone space: {space}"}), 404
+    return jsonify(get_zone_list(state))
+
+
+@app.route("/api/zones/<space>", methods=["POST"])
+def api_zones_update(space):
+    """
+    오브젝트 디텍션 노드가 구역별 블록 색상을 인식할 때마다 이 엔드포인트로 POST하세요.
+    space는 robot(로봇이 물건을 놓는 구역) 또는 human(사람이 참고용 물건을 놓는 구역)입니다.
+    예: requests.post(".../api/zones/robot", json={"zone": "3번구역", "color": "파랑"})
+        requests.post(".../api/zones/human", json={"zone": "2번구역", "color": "노랑"})
+    color를 생략하거나 null로 보내면 해당 구역을 빈 구역으로 표시합니다.
+    """
+    state = ZONE_SPACES.get(space)
+    if state is None:
+        return jsonify({"error": f"unknown zone space: {space}"}), 404
+    data = request.get_json(force=True, silent=True) or {}
+    zone = data.get("zone")
+    if zone not in state:
+        return jsonify({"error": f"unknown zone: {zone}"}), 400
+    color = data.get("color") or None
+    state[zone] = {"color": color, "updated_at": datetime.now().strftime("%H:%M:%S")}
+    return jsonify(get_zone_list(state))
+
+
+@app.route("/api/sentence")
+def api_sentence():
+    """카메라 모니터링 화면의 '인식 중인 문장' 패널 폴링용"""
+    return jsonify(current_sentence)
+
+
+@app.route("/api/sentence", methods=["POST"])
+def api_sentence_update():
+    """
+    sign_control 노드가 단어를 인식/삭제/통역할 때마다 이 엔드포인트로 POST하세요.
+    예: requests.post(".../api/sentence", json={"action": "start"})
+        requests.post(".../api/sentence", json={"action": "peek", "word": "파랑"})
+        requests.post(".../api/sentence", json={"action": "append", "word": "파랑"})
+        requests.post(".../api/sentence", json={"action": "clear"})
+        requests.post(".../api/sentence", json={"action": "translate", "text": "파란 블록을 가져와줘"})
+
+    peek은 아직 확정되지 않은, 지금 손을 들고 있는 동안의 실시간 추정값이다.
+    다른 액션은 모두 확정된 상태 변화이므로 부수적으로 live_word를 비운다.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    action = data.get("action", "append")
+    if action == "start":
+        # 문장 캡처를 막 시작함(예: 여는 박수) — 첫 단어가 오기 전에도 "구성 중" 상태를 바로 보여준다.
+        current_sentence["words"] = []
+        current_sentence["live_word"] = ""
+        current_sentence["status"] = "building"
+        current_sentence["translated"] = None
+    elif action == "peek":
+        current_sentence["live_word"] = data.get("word", "")
+    elif action == "append":
+        word = data.get("word")
+        if word:
+            current_sentence["words"].append(word)
+            current_sentence["live_word"] = ""
+            current_sentence["status"] = "building"
+            current_sentence["translated"] = None
+    elif action == "clear":
+        current_sentence["words"] = []
+        current_sentence["live_word"] = ""
+        current_sentence["status"] = "idle"
+        current_sentence["translated"] = None
+    elif action == "translate":
+        current_sentence["translated"] = data.get("text", "")
+        current_sentence["live_word"] = ""
+        current_sentence["status"] = "translated"
+    current_sentence["updated_at"] = datetime.now().strftime("%H:%M:%S")
+    return jsonify(current_sentence)
+
+
+@app.route("/api/recognize", methods=["POST"])
+def api_recognize():
+    """
+    비전/수어 인식 노드가 인식 결과를 이 엔드포인트로 POST하도록 연동하세요.
+    예: requests.post(".../api/recognize", json={"sign": "파랑", "confidence": 0.91,
+                                                  "command": "문장에 추가", "result": "성공"})
+    command/result을 생략하면 (예전 방향 명령 데모 호환용) COMMAND_MAP으로 추정합니다.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    sign = data.get("sign", random.choice(SIGN_LABELS))
+    confidence = float(data.get("confidence", round(random.uniform(0.4, 0.99), 2)))
+    command = data.get("command")
+    if command is None:
+        command = COMMAND_MAP.get(sign, "-")
+    result = data.get("result")
+    if result is None:
+        result = "성공" if confidence >= 0.6 and command != "-" else "실패"
+
+    entry = {
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "sign": sign,
+        "confidence": confidence,
+        "command": command,
+        "result": result,
+    }
+    recognition_logs.insert(0, entry)
+    if result == "성공":
+        robot_state["last_command"] = command
+    return jsonify(entry), 201
+
+
+frame_lock = threading.Lock()
+latest_frame = {"jpg": None}
+
+
+@app.route("/api/frame", methods=["POST"])
+def api_frame():
+    """
+    sign_control(sign_demo.py --admin)이 매 프레임(JPEG 바이트, Content-Type: image/jpeg)을
+    이 엔드포인트로 POST하면 /video_feed 가 그 화면을 그대로 중계합니다.
+    """
+    data = request.get_data()
+    if data:
+        with frame_lock:
+            latest_frame["jpg"] = data
+    return "", 204
+
+
+@app.route("/api/debug")
+def api_debug():
+    """로봇 상태 · 제어 패널 하단 디버그 로그 폴링용"""
+    return jsonify(debug_logs[:20])
+
+
+@app.route("/api/debug", methods=["POST"])
+def api_debug_add():
+    """
+    오류/디버그 이벤트를 기록하세요. level: info | warn | error
+    예: requests.post(".../api/debug",
+        json={"level": "error", "source": "robot_control", "message": "DSR_ROBOT2 연결 끊김"})
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    entry = {
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "level": data.get("level", "info"),
+        "source": data.get("source", "-"),
+        "message": data.get("message", ""),
+    }
+    debug_logs.insert(0, entry)
+    del debug_logs[20:]
+    return jsonify(entry), 201
+
+
+@app.route("/api/robot/status", methods=["POST"])
+def api_robot_status():
+    """
+    실제 로봇 제어 프로세스(block_sort.py --admin 등)가 자기 상태를 보고하는 용도.
+    /api/robot/control 과 방향이 반대다 (로봇 → 관리자). 넘어온 키만 갱신한다.
+    예: requests.post(".../api/robot/status",
+        json={"connected": true, "model": "Doosan M0609", "last_command": "pick 빨강 3"})
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    for key in ("connected", "mode", "last_command", "model", "power", "e_stop"):
+        if key in data:
+            robot_state[key] = data[key]
+    return jsonify(robot_state)
+
+
+@app.route("/api/robot/control", methods=["POST"])
+def api_robot_control():
+    """일시정지 / 비상정지 등 관리자 수동 제어. 실제 로봇 제어 노드로 명령을 전달하도록 구현하세요."""
+    action = (request.get_json(force=True, silent=True) or {}).get("action")
+    if action == "pause":
+        robot_state["mode"] = "PAUSED"
+    elif action == "resume":
+        robot_state["mode"] = "AUTO"
+    elif action == "e_stop":
+        robot_state["mode"] = "E-STOP"
+        robot_state["e_stop"] = True
+    return jsonify(robot_state)
+
+
+def gen_video_frames():
+    boundary = b"--frame\r\n"
+    while True:
+        with frame_lock:
+            frame = latest_frame["jpg"]
+        if frame:
+            yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+        time.sleep(0.05)  # /api/frame으로 들어오는 속도 이상으로 돌 필요 없음
+
+
+@app.route("/video_feed")
+def video_feed():
+    """
+    sign_control(sign_demo.py --admin)이 POST /api/frame 으로 밀어넣는 최신 프레임을
+    MJPEG로 중계합니다. 아직 프레임이 한 번도 안 왔으면 스트림은 열리되 데이터는 안 나갑니다.
+    """
+    return Response(
+        gen_video_frames(), mimetype="multipart/x-mixed-replace; boundary=frame"
+    )
+
+
+if __name__ == "__main__":
+    # 개발 서버. 배포 시 gunicorn/uwsgi 등으로 교체하세요.
+    # threaded=True 필수 — /video_feed 스트리밍 연결이 다른 API 폴링을 막지 않도록.
+    app.run(host="0.0.0.0", port=5000, debug=True, threaded=True)
