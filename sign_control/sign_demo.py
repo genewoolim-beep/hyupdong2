@@ -7,16 +7,20 @@
   python3 sign_demo.py train           학습
   python3 sign_demo.py run             실시간 인식 → 텍스트
   python3 sign_demo.py run --llm       + GPT로 자연스러운 문장 변환
+  python3 sign_demo.py run --admin     + signbot_admin 대시보드로 문장 상태 전송
 
 수어를 몰라도 됩니다. 모델은 '옳은 수어'가 아니라
 '당신이 일관되게 하는 동작'을 학습합니다. 매번 똑같이만 하세요.
 """
 import argparse
 import glob
+import json
 import os
 import subprocess
 import sys
+import threading
 import time
+import urllib.request
 from collections import deque
 
 import cv2
@@ -40,7 +44,7 @@ SEQ_LEN = 32                        # 모델 입력 길이 (리샘플 후)
 COUNTDOWN = 3                       # 녹화 전 카운트다운(초)
 GAP_SEC = 1.2                       # 배치 녹화에서 샘플 사이 쉼(초)
 
-CONF_TH = 0.80                      # 이 확률 넘어야 인정
+CONF_TH = 0.60                      # 이 확률 넘어야 인정
 VERB_BONUS = 0.05                   # 명사 다음에는 동사가 올 확률이 높다는 사전지식
 # 인식 단위는 '슬라이딩 창'이 아니라 '손이 올라와 있는 한 구간'이다.
 # 학습 데이터가 한 클립 = 한 동작이므로 인식도 같은 단위로 끊어야 맞는다.
@@ -65,6 +69,10 @@ WORD_KIND = {
     "놓다": "동사", "들다": "동사", "조립하다": "동사", "가져오다": "동사",
 }
 BLUE = (255, 170, 60)               # BGR — 짝지어진 명사·동사
+
+# 문장의 시작/끝을 표시하는 구분자 동작. 큰따옴표처럼 (박수)-명령…-박수)로 한 덩어리를 감싼다.
+# glosses에는 절대 들어가지 않는다 — run 루프에서 append 대신 캡처 상태를 토글하는 데만 쓴다.
+CLAP_WORD = "박수"
 
 WIN = "sign - run"
 PANEL_H = 185                       # 하단 패널 높이 (글로스 + 통역문 + 버튼)
@@ -479,6 +487,83 @@ def mode_train(epochs=140):
     print()
 
 
+# ───────────────────────── signbot_admin 연동 ─────────────────────────
+ADMIN_URL = os.environ.get("SIGN_ADMIN_URL", "http://localhost:5000")
+
+
+def push_sentence(action, **fields):
+    """signbot_admin의 /api/sentence 로 문장 상태를 보낸다.
+
+    카메라 루프를 막지 않도록 별도 스레드에서 fire-and-forget으로 보내고,
+    대시보드가 꺼져 있어도 인식 자체는 계속되어야 하니 실패는 조용히 무시한다.
+    """
+    def _send():
+        try:
+            body = json.dumps({"action": action, **fields}).encode("utf-8")
+            req = urllib.request.Request(
+                f"{ADMIN_URL}/api/sentence", data=body,
+                headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=1.0)
+        except Exception:
+            pass
+    threading.Thread(target=_send, daemon=True).start()
+
+
+def push_log(sign, confidence, command, result):
+    """signbot_admin의 /api/recognize 로 확정된 인식 이벤트 하나를 기록한다.
+
+    대시보드의 '오늘 인식 횟수' / '인식 성공률' / 로그 테이블이 이 호출로 채워진다.
+    """
+    def _send():
+        try:
+            body = json.dumps({
+                "sign": sign, "confidence": round(float(confidence), 2),
+                "command": command, "result": result,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                f"{ADMIN_URL}/api/recognize", data=body,
+                headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=1.0)
+        except Exception:
+            pass
+    threading.Thread(target=_send, daemon=True).start()
+
+
+_frame_lock = threading.Lock()
+_frame_holder = {"jpg": None}
+
+
+def set_latest_frame(frame_bgr):
+    """화면에 그릴 프레임을 JPEG로 인코딩해 다음 전송 대상으로 세팅한다.
+
+    네트워크 전송 자체는 하지 않는다 — 메인 루프(30fps)를 막지 않기 위해
+    실제 전송은 _frame_sender_loop 가 별도 스레드에서 자기 페이스로 가져간다.
+    """
+    ok, buf = cv2.imencode(".jpg", frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+    if ok:
+        with _frame_lock:
+            _frame_holder["jpg"] = buf.tobytes()
+
+
+def _frame_sender_loop():
+    while True:
+        with _frame_lock:
+            data = _frame_holder["jpg"]
+        if data is not None:
+            try:
+                req = urllib.request.Request(
+                    f"{ADMIN_URL}/api/frame", data=data,
+                    headers={"Content-Type": "image/jpeg"}, method="POST")
+                urllib.request.urlopen(req, timeout=1.0)
+            except Exception:
+                pass
+        time.sleep(0.08)   # 모니터링용이라 12fps 상한이면 충분하다
+
+
+def start_frame_sender():
+    threading.Thread(target=_frame_sender_loop, daemon=True).start()
+
+
 # ───────────────────────── 모드: 실시간 인식 ─────────────────────────
 def make_llm():
     if not os.environ.get("OPENAI_API_KEY"):
@@ -502,7 +587,7 @@ def make_llm():
     return run
 
 
-def mode_run(use_llm=False):
+def mode_run(use_llm=False, use_admin=False):
     import torch
 
     if not os.path.exists(MODEL_PT):
@@ -518,7 +603,11 @@ def mode_run(use_llm=False):
     ext, paint, cap = Extractor(), Painter(), open_cam()
     print(f"\n[인식] 라벨 {labs}")
     print("  Q 종료 / C 문장 지우기" + ("  / ENTER LLM 통역" if llm else ""))
-    print("  하단 [지우기] [통역] 버튼 클릭도 됩니다\n")
+    print("  하단 [지우기] [통역] 버튼 클릭도 됩니다")
+    if use_admin:
+        print(f"  → signbot_admin 전송: {ADMIN_URL}/api/sentence, /api/frame")
+        start_frame_sender()
+    print()
 
     ui = {}
 
@@ -554,6 +643,7 @@ def mode_run(use_llm=False):
     cur, prob, boosted = "", 0.0, False
     peek, tick = "", 0
     fps, t_prev = 0.0, time.time()
+    capturing = False           # 박수 사이 구간에서만 True — 여기서만 단어를 문장에 담는다
 
     while True:
         ok, frame = cap.read()
@@ -581,6 +671,8 @@ def mode_run(use_llm=False):
                 # 확정에는 쓰지 않는다 — 화면이 멈춘 듯 보이지 않게 하는 용도다.
                 if n_hand >= MIN_HAND and tick % 3 == 0:
                     peek = classify(seg)[0]
+                    if use_admin:
+                        push_sentence("peek", word=peek)
 
                 if gone >= END_HOLD or len(seg) >= MAX_SEG:
                     if n_hand >= MIN_HAND:
@@ -589,9 +681,43 @@ def mode_run(use_llm=False):
                         print(f"  {'→' if passed else '×'} {cur}  {prob*100:.0f}%"
                               f"   [{n_hand}프레임{', 가중' if boosted else ''}]")
                         if passed:
-                            glosses.append(cur)
+                            if cur == CLAP_WORD:
+                                if not capturing:              # 여는 박수 — 새 문장 시작
+                                    capturing = True
+                                    glosses, sentence = [], ""
+                                    print("  ▶ 명령 시작")
+                                    if use_admin:
+                                        push_sentence("start")
+                                        push_log(cur, prob, "문장 시작", "성공")
+                                else:                          # 닫는 박수 — 문장 확정
+                                    capturing = False
+                                    print(f"  ■ 명령 종료 — {glosses}")
+                                    if llm and glosses:
+                                        sentence = llm(glosses)
+                                        print(f"  [통역] {sentence}")
+                                    if use_admin:
+                                        if glosses:
+                                            # LLM이 꺼져 있으면 글로스를 그대로 이어붙여
+                                            # '전환된 명령'으로 보여준다.
+                                            final_text = sentence or " ".join(glosses)
+                                            push_sentence("translate", text=final_text)
+                                            push_log(cur, prob, final_text, "성공")
+                                        else:
+                                            push_sentence("clear")
+                                            push_log(cur, prob, "문장 종료(빈 문장)", "성공")
+                            elif capturing:
+                                glosses.append(cur)
+                                if use_admin:
+                                    push_sentence("append", word=cur)
+                                    push_log(cur, prob, "문장에 추가", "성공")
+                            else:
+                                print(f"  · 박수 없이 인식됨 — 무시: {cur}")
+                                if use_admin:
+                                    push_log(cur, prob, "-", "실패")
                     else:
                         print(f"  · 너무 짧음 ({n_hand}프레임) — 무시")
+                    if use_admin:
+                        push_sentence("peek", word="")   # 구간이 끝났으니 진행중 표시를 지운다
                     seg, gone, n_hand = [], 0, 0
 
         # ── 화면: cv2 도형을 먼저 다 그리고, 글자는 마지막에 한 번에 ──
@@ -612,6 +738,9 @@ def mode_run(use_llm=False):
                           [("대기 — 손을 올리세요", (120, 255, 120))], 24, 0))
         items.append(((CAP_W - 130, CAP_H - PANEL_H - 34),
                       [(f"{fps:.0f} fps", (150, 150, 150))], 22, 0))
+        cap_txt = "● 명령 수집 중 — 박수로 종료" if capturing else "박수를 쳐서 명령 시작"
+        items.append(((30, CAP_H - PANEL_H - 34),
+                      [(cap_txt, (80, 220, 255) if capturing else (150, 150, 150))], 22, 0))
 
         pair = paired_idx(glosses)
         items.append(((30, CAP_H - PANEL_H + 12),
@@ -634,6 +763,9 @@ def mode_run(use_llm=False):
 
         frame = paint.render(frame, items)
 
+        if use_admin and tick % 2 == 0:   # 30fps 원본에서 절반만 인코딩 — 모니터링용이면 충분
+            set_latest_frame(frame)
+
         now = time.time()
         fps = 0.9 * fps + 0.1 / max(now - t_prev, 1e-6)
         t_prev = now
@@ -644,9 +776,14 @@ def mode_run(use_llm=False):
             break
         if k == ord("c") or click == "지우기":
             glosses, sentence = [], ""
+            capturing = False
+            if use_admin:
+                push_sentence("clear")
         if (k == 13 or click == "통역") and llm and glosses:
             sentence = llm(glosses)
             print(f"  [통역] {sentence}")
+            if use_admin:
+                push_sentence("translate", text=sentence)
 
     cap.release()
     cv2.destroyAllWindows()
@@ -665,6 +802,8 @@ def main():
     t.add_argument("--epochs", type=int, default=140)
     u = sub.add_parser("run", help="실시간 인식")
     u.add_argument("--llm", action="store_true", help="GPT로 문장 변환")
+    u.add_argument("--admin", action="store_true",
+                   help="signbot_admin 대시보드(/api/sentence)로 문장 상태 전송")
 
     a = ap.parse_args()
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -675,7 +814,7 @@ def main():
     elif a.mode == "train":
         mode_train(a.epochs)
     elif a.mode == "run":
-        mode_run(a.llm)
+        mode_run(a.llm, a.admin)
 
 
 if __name__ == "__main__":
