@@ -6,7 +6,7 @@ Doosan M0609 협동로봇을 대상으로 한 프로젝트들. 각 폴더가 독
 |---|---|---|---|
 | [`voice_pickandplace/`](voice_pickandplace/) | 음성 기반 Pick & Place | 음성 | 동작 확인 |
 | `sign_control/` + `sign_processing` | 수어 기반 로봇 제어 | 수어 | 동작 확인 (물체 인식만) |
-| [`block_sort/`](block_sort/) | 색 블록 구역 분류 | 수어 / 텍스트 | 통합 완료, 실주행 확인 필요 |
+| [`block_sort/`](block_sort/) | 색 블록 구역 분류 + 배치 복제 | 수어 / 텍스트 | 실주행 확인 (복제 4/4) |
 
 ---
 
@@ -23,10 +23,12 @@ Doosan M0609 협동로봇을 대상으로 한 프로젝트들. 각 폴더가 독
 
 자세한 내용은 [voice_pickandplace/README.md](voice_pickandplace/README.md) 참고.
 
-> `object_detection` 은 현재 도구용 YOLO 모델(`yolov8n_tools_0122.pt`)을 쓴다.
-> 위 예시("사과 가져와")처럼 과일로 테스트하려면 `object_detection/object_detection/yolo.py`
-> 의 `YOLO_MODEL_FILENAME`/`YOLO_CLASS_NAME_JSON` 을 `fruit_best.pt`/`fruit_class_name.json`
-> 으로 되돌려야 한다 — 수어 어휘가 도구 쪽이라 전환해 둔 상태다.
+> `object_detection`은 두 검출기(`YoloModel`/`ColorModel`)를 다 갖고 있고
+> `ObjectDetectionNode(model_name=...)`로 고른다. 현재 **기본값은 `color`**다
+> (아래 `block_sort` 참고). `yolo`로 쓰려면 `model_name='yolo'`를 명시해야
+> 하고, 그 안에서도 `yolo.py`의 `YOLO_MODEL_FILENAME`이 지금 도구 모델
+> (`yolov8n_tools_0122.pt`)로 맞춰져 있어 위 예시("사과 가져와")는 바로
+> 안 된다 — `fruit_best.pt`/`fruit_class_name.json`으로 되돌려야 한다.
 
 ---
 
@@ -47,6 +49,12 @@ LLM은 쓰지 않는다 — 분류기가 이미 이산 단어를 출력하므로
 `망치 -> hammer` 하나뿐이다. `object_detection` 도구 모델의 나머지 클래스
 (drill/pliers/screwdriver/wrench)에 대한 수어를 `sign_control` 에서
 녹화·재학습하면 매핑을 한 줄씩 늘리면 된다.
+
+> 오늘 실제 목표는 도구가 아니라 **색깔 블록**(아래 `block_sort` 참고)이라,
+> `GLOSS_TO_OBJECT`가 지금 가리키는 어휘와 실제 과제가 어긋나 있다.
+> `sign_control`엔 이미 색깔 6종·1~6번구역·똑같이·좌우대칭 수어가
+> 녹화되어 있으니, 다음 단계는 `GLOSS_TO_OBJECT`를 색깔/구역 쪽으로
+> 확장해 `block_sort`와 잇는 것이다. 목적지(구역) 인식도 아직 안 붙어 있다.
 
 `sign_control/` 자체(녹화/학습/단독 데모, [sign_control/README.md](sign_control/README.md))는
 그대로 독립 실행되고, `voice_pickandplace/src/sign_processing/` 은 그 학습된
@@ -84,6 +92,9 @@ python3 block_sort/block_sort.py sign          # 수어로 명령
 python3 block_sort/block_sort.py pick 빨간색 3  # 빨간 블록을 3번으로
 python3 block_sort/block_sort.py pick 3 1      # 3번에 있는 것을 1번으로 (색 무관)
 ```
+
+색 이름은 `object_detection` 의 `color_model.py`(`COLOR_HSV_RANGES`)에 등록된 것만
+인식된다 — 빨강/주황/노랑/초록/파랑/보라, 한글 또는 영문.
 
 ### 수어 명령
 
@@ -234,8 +245,8 @@ source ~/doosan-voice-pickandplace/voice_pickandplace/install/setup.bash   # od_
 ```
 Ubuntu 22.04 / ROS2 Humble
 Python 3.10
-Doosan M0609 + OnRobot RG2      # voice_pickandplace 만 해당
-Intel RealSense D435i           # voice_pickandplace 만 해당
+Doosan M0609 + OnRobot RG2      # voice_pickandplace, block_sort 해당
+Intel RealSense D435i           # voice_pickandplace, block_sort 해당
 웹캠                             # sign_control
 ```
 
@@ -246,8 +257,10 @@ pip install -r requirements.txt
 `numpy==1.26.4` 와 `mediapipe<1.0` 이 고정되어 있다. 이 둘을 놓치면
 `cv_bridge` 와 ABI 가 충돌해 import 직후 세그폴트가 난다.
 
-`voice_pickandplace` 는 별도로 Doosan 드라이버 워크스페이스
-(`dsr_msgs2`, `dsr_bringup2` 등)와 `ros-humble-realsense2-camera` 가 필요하다.
+`voice_pickandplace` 와 `block_sort` 는 별도로 Doosan 드라이버 워크스페이스
+(`dsr_msgs2`, `dsr_bringup2` 등, 보통 `~/cobot_ws`)와
+`ros-humble-realsense2-camera` 가 필요하다. 이 드라이버 워크스페이스가
+비어 있으면 `import DR_init` 단계에서 바로 실패한다.
 `sign_control` 은 웹캠만 있으면 된다.
 
 ## API 키
