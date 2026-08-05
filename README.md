@@ -7,6 +7,7 @@ Doosan M0609 협동로봇을 대상으로 한 프로젝트들. 각 폴더가 독
 | [`voice_pickandplace/`](voice_pickandplace/) | 음성 기반 Pick & Place | 음성 | 동작 확인 |
 | `sign_control/` + `sign_processing` | 수어 기반 로봇 제어 | 수어 | 동작 확인 (물체 인식만) |
 | [`block_sort/`](block_sort/) | 색 블록 구역 분류 + 배치 복제 | 수어 / 텍스트 | 실주행 확인 (복제 4/4) |
+| [`signbot_admin/`](signbot_admin/) | 관리자 대시보드 (카메라·문장·구역·로봇 상태 통합) | — (Flask 웹) | UI 동작 확인, 로봇 상시 연동은 진행 중 |
 
 ---
 
