@@ -221,6 +221,59 @@ class Painter:
         return self.render(img, [(xy, [(s, color)], size, 0)])
 
 
+# 프레임을 어디서 받을지. v4l2 = 장치를 직접 연다(기본), ros = 토픽을 구독한다.
+# V4L2 장치는 한 프로세스만 열 수 있어서, 여러 프로그램이 같은 웹캠을 보려면
+# 누군가 하나가 열고 토픽으로 뿌려야 한다 (ros2 run sign_processing webcam_publisher).
+# RealSense 가 이미 그 구조다.
+FRAME_SOURCE = os.environ.get("SIGN_SOURCE", "v4l2").lower()
+FRAME_TOPIC = os.environ.get("SIGN_CAM_TOPIC", "/webcam/image_raw")
+
+
+class RosFrames:
+    """ROS2 토픽에서 프레임을 받는다. VideoCapture 와 같은 모양으로 쓴다.
+
+    자기 노드를 따로 만들어 read() 마다 한 번씩 돌린다. 부르는 쪽(block_sort)의
+    실행기를 빌리면 그쪽 콜백 안에서 멎을 수 있어서 노드를 나눠 둔다.
+    """
+
+    def __init__(self, topic=FRAME_TOPIC):
+        import rclpy
+        from cv_bridge import CvBridge
+        from sensor_msgs.msg import CompressedImage, Image
+        if not rclpy.ok():
+            rclpy.init()
+        self._rclpy = rclpy
+        self._node = rclpy.create_node("sign_frames")
+        self._bridge = CvBridge()
+        self._frame = None
+        # 압축과 날것 **둘 다** 구독한다. 발행 쪽이 어느 쪽으로 보내든 받으려는
+        # 것이다. 아무도 안 보내는 토픽을 구독하는 비용은 없다.
+        # 기본은 압축이다 — 날것은 한 장이 2.76MB 라 30fps 가 안 나온다.
+        self._node.create_subscription(
+            CompressedImage, f"{topic}/compressed", self._cb_jpeg, 1)
+        self._node.create_subscription(Image, topic, self._cb, 1)
+        self._topic = topic
+
+    def _cb(self, msg):
+        self._frame = self._bridge.imgmsg_to_cv2(msg, "bgr8")
+
+    def _cb_jpeg(self, msg):
+        self._frame = self._bridge.compressed_imgmsg_to_cv2(msg, "bgr8")
+
+    def isOpened(self):
+        return True
+
+    def read(self):
+        self._rclpy.spin_once(self._node, timeout_sec=0.02)
+        return (self._frame is not None), self._frame
+
+    def release(self):
+        try:
+            self._node.destroy_node()
+        except Exception:
+            pass
+
+
 def open_cam(index, width=1280, height=720):
     cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
@@ -248,6 +301,9 @@ class SignRecognizer:
         self.show_window = show_window
         self.painter = Painter.create() if show_window else None
         self._cap = None            # 세션 내내 열어 둔다. close() 로만 닫힌다.
+        # 화면을 밖으로 중계하고 싶을 때 부르는 콜백(프레임 한 장을 받는다).
+        # signbot_admin 대시보드로 보내는 데 쓴다. None 이면 아무 일도 안 한다.
+        self.on_frame = None
         self._verb_mask = np.array(
             [VERB_BONUS if kind_of(l) == "동사" else 0.0 for l in self.labels],
             np.float32)
@@ -269,7 +325,8 @@ class SignRecognizer:
         cv2.putText(frame, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
         return frame
 
-    def recognize_sentence(self, is_end, on_gloss=None, max_glosses=8, hint=""):
+    def recognize_sentence(self, is_end, on_gloss=None, max_glosses=8, hint="",
+                           delimiter=None):
         """문장 하나가 될 때까지 카메라 루프 한 번으로 계속 인식한다.
 
         recognize_one() 을 반복 호출하는 것과 다른 점 셋이다.
@@ -280,6 +337,11 @@ class SignRecognizer:
           · 직전 글로스가 명사면 동사에 가중치를 준다.
         어디서 끝낼지는 호출자가 is_end(glosses) 로 정한다 — 어휘마다 문장
         구조가 다르기 때문이다.  q 로 취소하면 None 을 돌려준다.
+
+        delimiter 를 주면 그 글로스가 문장의 여닫이가 된다.
+          첫 번째 — 여기서부터 모은다. 그 전에 인식된 것은 버린다.
+          두 번째 — 문장 끝. is_end 는 묻지 않는다.
+        지나가는 손짓이나 준비 동작이 명령에 섞이지 않게 하려는 것이다.
         """
         cap = self._camera()
         try:
@@ -290,6 +352,7 @@ class SignRecognizer:
             peek, tick = "", 0
             fps, t_prev = 0.0, time.time()
             miss = 0
+            armed = delimiter is None      # 여는 신호를 기다리는 중인가
 
             while True:
                 ok, frame = cap.read()
@@ -326,14 +389,27 @@ class SignRecognizer:
                             peek = self._classify(seg, prev)[0]
 
                         if gone >= END_HOLD or len(seg) >= MAX_SEG:
+                            ended = False
                             if n_hand >= MIN_HAND:
                                 cur, prob, boosted = self._classify(seg, prev)
                                 if prob >= CONF_TH:
-                                    glosses.append(cur)
-                                    if on_gloss:
-                                        on_gloss(cur, prob, boosted)
+                                    if delimiter and cur == delimiter:
+                                        if armed:
+                                            ended = True          # 닫는 신호
+                                        else:
+                                            armed = True          # 여는 신호
+                                            glosses = []          # 그 전 것은 버린다
+                                            cur, prob, boosted = "", 0.0, False
+                                        if on_gloss:
+                                            on_gloss(cur or delimiter, prob, boosted)
+                                    elif armed:
+                                        glosses.append(cur)
+                                        if on_gloss:
+                                            on_gloss(cur, prob, boosted)
+                                    # armed 전이면 조용히 버린다 (화면에도 안 쌓인다)
                             seg, gone, n_hand, peek = [], 0, 0, ""
-                            if glosses and (is_end(glosses) or len(glosses) >= max_glosses):
+                            if ended or (glosses and
+                                         (is_end(glosses) or len(glosses) >= max_glosses)):
                                 if self.show_window:
                                     self._draw(frame, info, glosses, cur, prob,
                                                boosted, seg, n_hand, peek, fps, hint)
@@ -341,9 +417,13 @@ class SignRecognizer:
                                     time.sleep(RESULT_HOLD_SEC)
                                 return glosses
 
+                if not self.show_window and self.on_frame:
+                    # 창을 안 띄워도 대시보드로는 보낸다.
+                    self.on_frame(frame)
                 if self.show_window:
+                    tip = hint if armed else f"{delimiter} 로 시작하세요"
                     self._draw(frame, info, glosses, cur, prob, boosted,
-                               seg, n_hand, peek, fps, hint)
+                               seg, n_hand, peek, fps, tip)
                     k = cv2.waitKey(1) & 0xFF
                     if k == ord("q"):
                         return None
@@ -365,12 +445,17 @@ class SignRecognizer:
             self._cap.release()
             self._cap = None
         if self._cap is None:
-            self._cap = open_cam(self.cam_index)
+            if FRAME_SOURCE == "ros":
+                self._cap = RosFrames()
+                print(f"  프레임 출처: ROS 토픽 {FRAME_TOPIC}")
+            else:
+                self._cap = open_cam(self.cam_index)
             if self.show_window:
                 cv2.namedWindow(WIN)
-        else:
+        elif FRAME_SOURCE != "ros":
             # 로봇이 움직이는 동안 아무도 안 읽어 큐에 낡은 장면이 남아 있다.
             # 그대로 쓰면 방금 끝난 동작을 다시 인식할 수 있어 몇 장 버린다.
+            # 토픽은 항상 최신 한 장만 들고 있어 이 문제가 없다.
             for _ in range(5):
                 self._cap.read()
         return self._cap
@@ -392,6 +477,8 @@ class SignRecognizer:
         cv2.rectangle(frame, (0, h - panel), (w, h), (25, 25, 25), -1)
 
         if self.painter is None:         # 한글 폰트가 없으면 글로스만 영문 좌표로
+            if self.on_frame:
+                self.on_frame(frame)
             cv2.imshow(WIN, frame)
             return
 
@@ -418,7 +505,10 @@ class SignRecognizer:
         items.append(((30, h - panel + 104),
                       [("Q 취소 / C 지우기", (150, 150, 150))], 22, 0))
 
-        cv2.imshow(WIN, self.painter.render(frame, items))
+        shown = self.painter.render(frame, items)
+        if self.on_frame:
+            self.on_frame(shown)
+        cv2.imshow(WIN, shown)
 
     def recognize_one(self):
         """손을 올렸다 내리는 동작 한 번을 기다려 (라벨, 확률)을 반환한다.

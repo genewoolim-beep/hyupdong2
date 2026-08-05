@@ -27,8 +27,20 @@ import cv2
 import numpy as np
 
 # ───────────────────────── 설정 ─────────────────────────
-CAM_INDEX = int(os.environ.get("SIGN_CAM", 0))       # LG Camera (video1은 메타데이터 전용이라 열리지 않음)
 CAP_W, CAP_H = 1280, 720
+
+# 프레임을 어디서 받을지.
+#   v4l2  /dev/videoN 을 직접 연다 (기본). 한 프로세스만 열 수 있다.
+#   ros   /webcam/image_raw 토픽을 구독한다. 구독자 수에 제한이 없어서
+#         수어 인식과 검출·대시보드가 **동시에** 같은 영상을 본다.
+# ros 로 쓰려면 발행 노드가 먼저 떠 있어야 한다:
+#   ros2 run sign_processing webcam_publisher
+FRAME_SOURCE = os.environ.get("SIGN_SOURCE", "v4l2").lower()
+FRAME_TOPIC = os.environ.get("SIGN_CAM_TOPIC", "/webcam/image_raw")
+
+# 장치 번호는 박아두지 않는다. USB 를 다시 꽂으면 번호가 통째로 밀리고,
+# 하필 RealSense 를 열면 검출이 죽는다. 자세한 이유는 find_webcam() 주석 참고.
+SIGN_CAM_ENV = os.environ.get("SIGN_CAM")
 
 # 경로는 스크립트 위치를 기준으로 잡는다. 절대경로를 박아두면
 # 저장소를 clone 한 사람이 손대야 실행된다.
@@ -241,21 +253,138 @@ def resample(seq, n=SEQ_LEN):
 
 
 # ───────────────────────── 카메라 ─────────────────────────
+# 이 이름이 들어간 장치는 수어용 웹캠이 아니다.
+#   RealSense  검출용이다. 여기를 V4L2 로 열면 RealSense ROS 드라이버가 장치를
+#              못 잡아 검출이 통째로 죽는다 — 실제로 그렇게 됐다.
+#   loopback   Iriun 같은 가상 장치. 열려도 프레임이 안 온다.
+# sign_processing/webcam_publisher.py 에 같은 표가 있다. 한쪽만 고치면 갈린다.
+NOT_WEBCAM = ("realsense", "loopback")
+
+
+def list_video_devices():
+    """`v4l2-ctl --list-devices` 를 파싱해 [(장치이름, [번호, ...]), ...] 로."""
+    try:
+        out = subprocess.run(["v4l2-ctl", "--list-devices"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    groups, name = [], None
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            name = line.strip().rstrip(":")
+            groups.append((name, []))
+        elif groups and "/dev/video" in line:
+            groups[-1][1].append(int(line.strip().rsplit("video", 1)[1]))
+    return groups
+
+
+def find_webcam():
+    """수어용 웹캠의 장치 번호를 **이름으로** 찾는다.
+
+    번호를 박아두면 안 된다. USB 를 다시 꽂거나 부팅 순서가 달라지면 번호가
+    통째로 밀린다. 실측 2026-08-05:
+        video0      Iriun (가상 loopback)
+        video1~6    RealSense D435i      ← 예전에는 여기가 웹캠이었다
+        video7,8    HD Webcam            ← 진짜 수어용 (7=영상, 8=메타데이터)
+    이 상태에서 예전 기본값으로 열면 **RealSense 를 가로채** 검출이 죽는다.
+    영상이 나오는 노드인지(MJPG)까지 확인해야 메타데이터 노드를 안 잡는다.
+    """
+    for name, indices in list_video_devices():
+        if any(bad in name.lower() for bad in NOT_WEBCAM):
+            continue
+        for i in indices:
+            try:
+                out = subprocess.run(["v4l2-ctl", "-d", f"/dev/video{i}",
+                                      "--list-formats"],
+                                     capture_output=True, text=True,
+                                     timeout=5).stdout
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if "MJPG" in out:
+                return i, name
+    return None, None
+
+
+def resolve_index():
+    """SIGN_CAM 이 있으면 그것, 없으면 이름으로 찾은 번호."""
+    if SIGN_CAM_ENV is not None and SIGN_CAM_ENV.strip() != "":
+        return int(SIGN_CAM_ENV)
+    idx, name = find_webcam()
+    if idx is None:
+        sys.exit("수어용 웹캠을 못 찾았습니다. `v4l2-ctl --list-devices` 로 확인하고 "
+                 "SIGN_CAM=<번호> 로 지정하세요.")
+    print(f"  웹캠 자동 선택: /dev/video{idx}  ({name})")
+    return idx
+
+
+class RosFrames:
+    """ROS2 토픽에서 프레임을 받는다. VideoCapture 와 같은 모양으로 쓴다.
+
+    V4L2 장치는 한 프로세스만 열 수 있다. 그래서 이 데모가 장치를 직접 열면
+    같은 웹캠을 보려는 다른 프로그램(대시보드 중계 등)이 못 연다. 발행 노드
+    하나만 장치를 열고 토픽으로 뿌리면 구독자 수에 제한이 없다.
+    sign_processing/gesture_recognizer.py 에 같은 어댑터가 있다.
+    """
+
+    def __init__(self, topic=FRAME_TOPIC):
+        import rclpy
+        from cv_bridge import CvBridge
+        from sensor_msgs.msg import CompressedImage, Image
+        if not rclpy.ok():
+            rclpy.init()
+        self._rclpy = rclpy
+        self._node = rclpy.create_node("sign_demo_frames")
+        self._bridge = CvBridge()
+        self._frame = None
+        # 압축과 날것 둘 다 구독한다. 발행 쪽이 어느 쪽으로 보내든 받는다.
+        # 기본은 압축이다 — 날것은 한 장이 2.76MB 라 30fps 가 안 나온다.
+        self._node.create_subscription(
+            CompressedImage, f"{topic}/compressed", self._cb_jpeg, 1)
+        self._node.create_subscription(Image, topic, self._cb, 1)
+        print(f"  프레임 출처: ROS 토픽 {topic}[/compressed]")
+
+    def _cb(self, msg):
+        self._frame = self._bridge.imgmsg_to_cv2(msg, "bgr8")
+
+    def _cb_jpeg(self, msg):
+        self._frame = self._bridge.compressed_imgmsg_to_cv2(msg, "bgr8")
+
+    def isOpened(self):
+        return True
+
+    def read(self):
+        # 토픽은 항상 최신 한 장만 들고 있어 낡은 프레임을 버릴 필요가 없다.
+        self._rclpy.spin_once(self._node, timeout_sec=0.02)
+        return (self._frame is not None), self._frame
+
+    def release(self):
+        try:
+            self._node.destroy_node()
+        except Exception:
+            pass
+
+
 def open_cam():
-    cap = cv2.VideoCapture(CAM_INDEX, cv2.CAP_V4L2)
+    if FRAME_SOURCE == "ros":
+        return RosFrames()
+
+    index = resolve_index()
+    cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
     # C270은 기본이 YUYV라 720p에서 6fps밖에 안 나온다. MJPG로 강제해야 한다.
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAP_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAP_H)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     if not cap.isOpened():
-        sys.exit(f"카메라 {CAM_INDEX} 를 열 수 없습니다.")
+        sys.exit(f"카메라 {index} 를 열 수 없습니다.")
     for _ in range(5):
         cap.read()
     # C270은 어두우면 노출을 늘리려고 스스로 프레임률을 절반(15fps)으로 떨군다.
     # 이 설정만 끄면 밝기는 그대로인데 30fps가 나온다. OpenCV로는 못 건드려서
     # v4l2-ctl 을 직접 부른다.
-    subprocess.run(["v4l2-ctl", "-d", f"/dev/video{CAM_INDEX}",
+    subprocess.run(["v4l2-ctl", "-d", f"/dev/video{index}",
                     "-c", "exposure_dynamic_framerate=0"], capture_output=True)
     return cap
 

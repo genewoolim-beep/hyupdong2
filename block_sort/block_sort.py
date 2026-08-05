@@ -31,6 +31,7 @@ import time
 import numpy as np
 import rclpy
 import yaml
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from scipy.spatial.transform import Rotation
 
@@ -111,8 +112,18 @@ ZONE_RADIUS = float(os.environ.get("ZONE_RADIUS", 45.0))
 # 팔이 완전히 멎은 것은 보장하지 않는다. 자세한 이유는 goto() 주석 참고.
 SETTLE_SEC = float(os.environ.get("SETTLE_SEC", 0.6))
 
+# 검출 서비스 한 번을 기다릴 시간(초). 노드가 죽으면 색마다 이만큼 매달리므로
+# 너무 길면 안 된다. 정상 응답은 0.2~0.6초다.
+SVC_TIMEOUT = float(os.environ.get("SVC_TIMEOUT", 8.0))
+SVC_WAIT = float(os.environ.get("SVC_WAIT", 3.0))    # 서비스가 떠 있는지 볼 시간
+
 # 이동이 실제로 반영됐는지 판정하는 허용 오차(mm). movel() 주석 참고.
 MOVE_TOL = float(os.environ.get("MOVE_TOL", 8.0))
+
+# 컨트롤러가 명령을 거부했을 때 다시 넣기 전에 기다리는 시간(초).
+# 재시도마다 이 값의 배수로 늘린다 — 거부는 큐가 비면 풀리므로 조금 기다리는
+# 것이 곧바로 다시 넣는 것보다 빨리 성공한다.
+MOVE_RETRY_WAIT = float(os.environ.get("MOVE_RETRY_WAIT", 0.5))
 
 # 블록을 물고 xy 로 옮길 때 올라가는 절대 높이(mm). lift_height(150) 로는
 # TCP 가 판에서 137mm 인데, 손가락이 그보다 한참 아래로 내려와 옆 블록을 스친다.
@@ -125,8 +136,11 @@ CACHE_TOLERANCE = 70.0
 
 # 특정 색만 찾아 다시 돌 때 건너뛸 앞쪽 경유점 수.
 #   1번  인간구역 관측용이라 프리 블록이 없다
-#   2번  로봇구역 쪽이라 프리 블록이 거의 없다 (실측에서 매번 빈손이었다)
-# 프리 블록이 실제로 모이는 3번부터 돈다.
+#   2번  안쪽 로봇구역 점유 확인용이라 프리 블록이 거의 없다
+# 둘 다 '집을 블록을 찾는' 목적이 아니므로 재순회에서는 건너뛴다. 다만 전체
+# 순회(copy_human)에서는 반드시 지난다 — 2번이 로봇3·4번을 보는 유일한 자리다.
+# 경유점을 지우거나 더하면 이 값도 같이 맞춰야 한다. 안 그러면 재순회 범위가
+# 통째로 밀린다.
 RESCAN_SKIP = int(os.environ.get("RESCAN_SKIP", 2))
 
 GRIPPER_NAME = "rg2"
@@ -186,9 +200,27 @@ def _admin_post(path, payload):
     threading.Thread(target=_send, daemon=True).start()
 
 
+# 대시보드(app.py 의 COLOR_HEX)는 짧은 이름을 쓰고, 검출 쪽은 color_ranges.json 의
+# 긴 이름을 쓴다. 서로 이름이 달라 색상 칩이 안 그려졌다 — COLOR_HEX.get("빨간색")
+# 이 None 이라 구역 데이터는 들어갔는데 색만 안 보였다.
+# 검출·구역 판정은 긴 이름을 계속 쓰고, 내보낼 때만 여기서 바꾼다.
+# '색'만 떼면 빨간색→빨간, 노란색→노란 이 되어 서버가 못 알아본다. 대응표로 적는다.
+ADMIN_COLOR = {
+    "빨간색": "빨강", "주황색": "주황", "노란색": "노랑",
+    "초록색": "초록", "파란색": "파랑", "보라색": "보라",
+}
+
+
+def _short_color(color):
+    if not color:
+        return color                      # 빈 구역은 None 그대로
+    return ADMIN_COLOR.get(color, color)  # 이미 짧은 이름이면 그대로
+
+
 def push_zone(space, zone_num, color):
     """구역 하나의 색을 signbot_admin에 반영한다. space: robot | human"""
-    _admin_post(f"/api/zones/{space}", {"zone": f"{zone_num}번구역", "color": color})
+    _admin_post(f"/api/zones/{space}",
+                {"zone": f"{zone_num}번구역", "color": _short_color(color)})
 
 
 def push_zones(space, zone_colors, all_zone_nums):
@@ -241,10 +273,18 @@ def movel(p, vel=VEL_L, acc=ACC_L, tol=None, tries=3, timeout=20.0):
     벗어나 보였고, 그 비스듬한 시야에서 잰 각도가 4° 흔들려(64→63→60)
     큐브가 틀어져 물렸다.
 
-    상태(STANDBY/MOVING)가 아니라 **위치**를 지켜본다. 상태로 판단하면 두 번
-    틀린다. 명령 직후에는 아직 STANDBY 라 '안 움직였다'고 오판하고, 반대로
-    짧은 이동은 MOVING 이 관측되기 전에 끝나 고정 타임아웃을 꽉 채운다
-    (실측: 배치 한 번이 12초 → 23초). 위치는 그 둘 다에 흔들리지 않는다.
+    **movel 서비스는 명령을 접수하면 바로 돌아온다.** 모션이 끝난 것이 아니다.
+    _async=0 이라 동기인 줄 알았는데, 실측 2026-08-05 로 아니라는 게 드러났다:
+    반환값은 51번 모두 0(성공)인데 바로 뒤에 읽은 위치는 목표가 아니었다.
+    즉 '거부' 가 아니라 '아직 가는 중' 이었다.
+
+    그래서 모션 완료는 **mwait() 로 기다린다**. movej 가 원래 그렇게 하고 있었고
+    movel 만 빠져 있었다. 완료를 기다린 뒤에 위치를 보면 판정이 정확해진다.
+
+    이 함수는 두 번 잘못 고쳤다. 남겨 두는 이유는 같은 길을 또 가지 않기 위해서다.
+      · 위치 폴링 — 출발 전과 정지를 구별 못 해 멀쩡한 이동을 포기했다.
+      · 반환값만 확인 — 접수 즉시 0 이 오므로 항상 '안 갔다' 로 읽혔고,
+        재시도 대기(0.5→1.0→1.5초)가 그대로 파지 전 공중 대기가 됐다.
     """
     p = list(p)
     tol = MOVE_TOL if tol is None else tol
@@ -252,27 +292,20 @@ def movel(p, vel=VEL_L, acc=ACC_L, tol=None, tries=3, timeout=20.0):
         cur = get_current_posx()[0]
         if _reached(cur, p, tol):
             return True                      # 이미 목표에 있다
-        _movel_raw(p, vel=vel, acc=acc)
-
-        t0, last, still = time.time(), None, 0
-        while time.time() - t0 < timeout:
-            cur = get_current_posx()[0]
-            if _reached(cur, p, tol):
-                return True
-            if last is not None and np.hypot(cur[0] - last[0], cur[1] - last[1]) < 0.5 \
-                    and abs(cur[2] - last[2]) < 0.5:
-                still += 1
-                if still >= 6:               # 0.3초 정지 = 더 갈 생각이 없다
-                    break
-            else:
-                still = 0
-            last = cur
-            time.sleep(0.05)
-
+        # 앞 모션이 아직 돌고 있으면 이 명령은 버려진다. 미리 막아 둔다.
+        wait_idle()
+        if _movel_raw(p, vel=vel, acc=acc) != 0:
+            print(f"이동 명령이 거부됐습니다 (컨트롤러가 바쁨). 재시도 {k}/{tries}")
+            time.sleep(MOVE_RETRY_WAIT)
+            continue
+        mwait()                              # 모션이 실제로 끝날 때까지
+        wait_idle()
+        cur = get_current_posx()[0]
+        if _reached(cur, p, tol):
+            return True
         err = float(np.hypot(cur[0] - p[0], cur[1] - p[1]))
-        print(f"이동이 반영되지 않았습니다 — 목표에서 xy {err:.0f}mm, "
-              f"z {abs(cur[2] - p[2]):.0f}mm 어긋남. 재시도 {k}/{tries}")
-        time.sleep(0.3)
+        print(f"이동이 끝났는데 목표에서 xy {err:.0f}mm, "
+              f"z {abs(cur[2] - p[2]):.0f}mm 벗어나 있습니다. 재시도 {k}/{tries}")
     print(f"경고: {tries}회 시도했으나 목표에 못 갔습니다 {[round(v, 1) for v in p[:3]]}")
     return False
 
@@ -317,15 +350,32 @@ def load_colors():
 KNOWN_COLORS = load_colors()
 
 
-def level_att(att):
-    """자세각의 기울기만 펴서 공구가 정확히 아래를 보게 한다. 요(yaw)는 유지.
+# ry 를 **정확히** 180 으로 두지 않는 이유. ZYZ 에서 ry=180 은 표현의 특이점
+# (짐벌락)이다. 회전 자체는 멀쩡하지만 행렬→오일러 역변환이 유일하지 않아,
+# scipy 가 `Gimbal lock detected. Setting third angle to zero` 경고와 함께
+# rz2 를 0 으로 몰아버린다. 그러면 rotate_tool() 이 만든 파지 자세가
+#   ry=180.0 → rz1 -122.79 (지금 46.46 에서 -169.25도!), rz2 0.00
+#   ry=179.9 → rz1   46.46 (변화 0.00도),              rz2 169.25
+# 가 된다. 둘은 회전행렬이 완전히 같은데도 컨트롤러에 넘어가는 각도가 다르다.
+# movel 은 이 각도를 그대로 보간하므로, 180 쪽은 손목을 반 바퀴 돌리라는
+# 명령이 되어 조용히 거부된다 — 실측 2026-08-05 에 TRANSIT_Z 상승과
+# hover_over 가 통째로 씹힌 원인이 이것이다(재시도 21회, 포기 7회).
+# 0.1도 기울면 손가락 60mm 깊이에서 0.1mm 어긋난다. 놓기 오차 10mm 에 비하면
+# 없는 값이고, 대신 표현이 잘 정의된 영역에 머문다.
+LEVEL_RY = float(os.environ.get("LEVEL_RY", 179.9))
 
-    ZYZ 에서 ry=180 이면 공구 z 축이 정확히 -z(아래)를 향한다(수치 확인).
+
+def level_att(att):
+    """자세각의 기울기만 펴서 공구가 (거의) 정확히 아래를 보게 한다. 요는 유지.
+
+    ZYZ 에서 ry≈180 이면 공구 z 축이 -z(아래)를 향한다.
     관측 자세가 기울어져 있으면(observe_free 실측 26.5°) 그 기울기가 파지 자세까지
     그대로 딸려와, 손가락이 판에 비스듬히 내려가 모서리를 물게 된다.
     광축도 같이 기울어 x,y 이동이 화면 중심 이동과 어긋난다.
+
+    정확히 180 이 아니라 LEVEL_RY 를 쓰는 이유는 그 상수 주석 참고.
     """
-    return [att[0], 180.0, att[2]]
+    return [att[0], LEVEL_RY, att[2]]
 
 
 def wait_gripper():
@@ -664,10 +714,13 @@ class BlockSort(Node):
                 f"(프리 ({xy[0]:.0f}, {xy[1]:.0f}) 에서 집기) ──")
             if self.pick_cached(color, xy, dst):
                 placed[dst] = color
+                # 한 개 놓을 때마다 바로 보낸다. 네 개를 다 끝내고 한꺼번에 보내면
+                # 2분 넘게 화면이 그대로여서 진행 중인지 멈춘 건지 알 수가 없다.
+                push_zone("robot", dst, color)
             else:
                 ok = False
         if placed:
-            # 다시 순회하지 않고, 이번에 놓은 것만 원래 점유 상태에 얹어서 반영한다.
+            # 마무리로 전체를 한 번 더 맞춘다 — 중간에 놓친 갱신이 있어도 여기서 정리된다.
             push_zones("robot", {**occ, **placed}, sorted(self.cfg["zones"]))
         self.go_home()
         self.get_logger().warn(f"복제 {'완료' if ok else '일부 실패'}")
@@ -773,17 +826,29 @@ class BlockSort(Node):
         검출 노드가 (x, y, z, 각도) 를 이어붙여 보내므로 4개씩 끊어 읽는다.
         믿을 만한 순으로 와 있어 첫 번째가 예전 결과와 같다.
         """
-        if not self.cli.wait_for_service(timeout_sec=5.0):
+        if getattr(self, "_svc_down", False):
+            return []                        # 이번 명령에서 이미 끊겼다
+        if not self.cli.wait_for_service(timeout_sec=SVC_WAIT):
+            # 여기서도 플래그를 세운다. 안 그러면 색마다 SVC_WAIT 씩 기다려
+            # 6색이면 그것만 30초다 (실측).
+            self._svc_down = True
             self.get_logger().error("/get_3d_position 서비스가 없습니다. "
                                     "object_detection 노드를 먼저 띄우세요.")
             return []
         self.req.target = target
         fut = self.cli.call_async(self.req)
-        rclpy.spin_until_future_complete(self, fut, timeout_sec=20.0)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=SVC_TIMEOUT)
         if fut.result() is None:
-            self.get_logger().error("서비스 응답 없음")
+            # 검출 노드가 죽었거나 멎었다. 색마다 20초씩 기다리면 6색에 2분을
+            # 버린다 — 실측에서 명령을 내리고 2분간 아무 일도 안 일어났다.
+            # 한 번 끊기면 이 명령은 접는다.
+            self._svc_down = True
+            self.get_logger().error(
+                f"검출 서비스 응답 없음({SVC_TIMEOUT:.0f}초) — "
+                "object_detection 노드가 살아 있는지 확인하세요.")
             return []
 
+        self._svc_down = False
         raw = list(fut.result().depth_position)
         if len(raw) < 4 or sum(raw[:3]) == 0:
             # quiet 는 '여러 번 물어보는 중'이라는 뜻이다. detect_in_zone 은 아는 색을
@@ -930,7 +995,7 @@ class BlockSort(Node):
         """z 를 티칭값으로 바꾸지 않은 날것의 base 좌표. 든 블록을 잴 때 쓴다."""
         self.req.target = target
         fut = self.cli.call_async(self.req)
-        rclpy.spin_until_future_complete(self, fut, timeout_sec=20.0)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=SVC_TIMEOUT)
         if fut.result() is None:
             return None
         cam = list(fut.result().depth_position)
@@ -1335,6 +1400,7 @@ class BlockSort(Node):
                 f"[{how}] '{text}' → " +
                 ", ".join(f"{sc.describe(s)}→{z}번" for s, z in steps))
             ok = True
+            self._svc_down = False        # 명령마다 새로 판단한다
             for src, zone in steps:
                 if src == "copy":
                     # zone 자리에 mirror 여부가 실려 온다 (sign_command.COPY_GLOSS)
@@ -1433,12 +1499,17 @@ def main():
                 node.run_one(as_target(s[0]), int(s[1]))
         else:
             sys.exit(__doc__)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # Ctrl-C 나 kill 은 오류가 아니다. 역추적을 쏟아내지 않는다.
+        print("\n중단됨")
     except Exception as e:
         push_debug("error", "block_sort", f"'{' '.join(sys.argv[1:])}' 실행 중 오류: {e}")
         raise
     finally:
         push_robot_status(connected=False)
-        rclpy.shutdown()
+        time.sleep(0.3)                  # 대시보드로 가는 마지막 전송을 기다린다
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

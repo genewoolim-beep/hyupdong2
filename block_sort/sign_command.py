@@ -30,6 +30,8 @@ import json
 import os
 import re
 import sys
+import threading
+import time
 
 # ── 글로스 ↔ 시스템 어휘 ────────────────────────────────────────────
 # sign_control/sign_data 에 녹화된 라벨이 왼쪽, object_detection 의
@@ -49,10 +51,12 @@ GLOSS_TO_ZONE = {f"{i}번구역": i for i in range(1, 7)}
 SENTENCE_END = {"놓다", "가져오다", "들다", "조립하다"}
 MAX_GLOSSES = 6          # 끝맺음 동사가 없어도 여기서 끊는다
 
-# 수어용 웹캠 인덱스. 이 PC 는 0번이 가상 루프백(Iriun, 열리지 않음)이고
-# 실제 웹캠이 1번, 2~8번이 RealSense 다. sign_processing 도 1번을 쓴다.
-# (sign_demo.py 는 다른 PC 기준이라 0번이 기본이다 — 그쪽과 다른 게 맞다.)
-DEFAULT_CAM = 1
+# 수어용 웹캠 인덱스는 **박아두지 않는다**. USB 를 다시 꽂으면 번호가 통째로
+# 밀린다. 실측 2026-08-05 에 RealSense 가 video1~6 을 가져가면서, 예전 기본값
+# 1번은 웹캠이 아니라 **RealSense 깊이 노드**가 됐다. 그걸 V4L2 로 열면
+# RealSense ROS 드라이버가 장치를 못 잡아 검출이 통째로 죽는다.
+# 이름으로 찾는 방법은 webcam_publisher.find_webcam() 에 있다.
+DEFAULT_CAM = 0          # 이름으로 못 찾았을 때만 쓰는 최후 기본값
 
 LLM_MODEL = os.environ.get("SIGN_LLM_MODEL", "gpt-4o")
 # 저장소에 키를 두지 않으므로 환경변수나 voice_processing 의 .env 에서 읽는다.
@@ -71,6 +75,57 @@ SIGN_PROCESSING_DIR = os.environ.get(
 
 
 # ── 수어 인식 ───────────────────────────────────────────────────────
+# ── signbot_admin 으로 화면 중계 ────────────────────────────────────
+# sign_demo.py 는 인식만 하고 로봇을 안 움직이고, block_sort.py sign 은 로봇을
+# 움직이지만 화면을 안 보냈다. 웹캠은 한 프로세스만 열 수 있어서 "화면을 보려면
+# 로봇이 안 움직이고, 로봇을 움직이면 화면이 안 나오는" 상태였다.
+# 그래서 이쪽에도 프레임 전송을 붙인다. 방식은 sign_demo.py 와 같다.
+ADMIN_URL = os.environ.get("SIGN_ADMIN_URL", "http://localhost:5000")
+USE_ADMIN = "--admin" in sys.argv
+
+_frame_lock = threading.Lock()
+_frame_holder = {"jpg": None}
+_sender_started = False
+
+
+def set_latest_frame(frame_bgr):
+    """최신 한 장만 들고 있는다. 전송은 별도 스레드가 자기 페이스로 가져간다.
+
+    인식 루프가 전송을 기다리면 프레임률이 네트워크에 묶인다.
+    """
+    import cv2
+    ok, buf = cv2.imencode(".jpg", frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+    if ok:
+        with _frame_lock:
+            _frame_holder["jpg"] = buf.tobytes()
+
+
+def _frame_sender_loop():
+    import urllib.request
+    while True:
+        with _frame_lock:
+            data = _frame_holder["jpg"]
+        if data is not None:
+            try:
+                req = urllib.request.Request(
+                    f"{ADMIN_URL}/api/frame", data=data,
+                    headers={"Content-Type": "image/jpeg"}, method="POST")
+                urllib.request.urlopen(req, timeout=1.0)
+            except Exception:
+                pass
+        time.sleep(0.08)          # 모니터링용이라 12fps 상한이면 충분하다
+
+
+def start_frame_sender():
+    global _sender_started
+    if _sender_started or not USE_ADMIN:
+        return None
+    _sender_started = True
+    threading.Thread(target=_frame_sender_loop, daemon=True).start()
+    print(f"  → signbot_admin 화면 전송: {ADMIN_URL}/api/frame")
+    return set_latest_frame
+
+
 def make_recognizer(cam_index=None, show_window=None):
     """sign_processing 의 인식기를 그대로 쓴다.
 
@@ -93,11 +148,37 @@ def make_recognizer(cam_index=None, show_window=None):
     from sign_processing.gesture_recognizer import SignRecognizer   # noqa: E402
 
     if cam_index is None:
-        cam_index = int(os.environ.get("SIGN_CAM", DEFAULT_CAM))
+        cam_index = resolve_cam()
     if show_window is None:
         show_window = os.environ.get("SIGN_SHOW_WINDOW", "1") != "0"
-    check_cam(cam_index)
-    return SignRecognizer(model, hand, pose, cam_index, show_window=show_window)
+    # ROS 토픽에서 받을 때는 장치를 열지 않으므로 검사도 안 한다.
+    # 대신 발행 노드가 떠 있어야 한다 (ros2 run sign_processing webcam_publisher).
+    if os.environ.get("SIGN_SOURCE", "v4l2").lower() != "ros":
+        check_cam(cam_index)
+    rec = SignRecognizer(model, hand, pose, cam_index, show_window=show_window)
+    rec.on_frame = start_frame_sender()      # --admin 없으면 None (아무 일 없음)
+    return rec
+
+
+def resolve_cam():
+    """SIGN_CAM 이 있으면 그것, 없으면 장치 **이름**으로 찾는다.
+
+    번호를 박아두면 RealSense 를 가로채는 사고가 난다 (DEFAULT_CAM 주석 참고).
+    찾는 로직은 webcam_publisher 한 곳에만 둔다 — 두 벌이 되면 한쪽만 고쳐진다.
+    """
+    env = os.environ.get("SIGN_CAM")
+    if env is not None and env.strip() != "":
+        return int(env)
+    try:
+        sys.path.insert(0, SIGN_PROCESSING_DIR)
+        from sign_processing.webcam_publisher import find_webcam
+        idx, name = find_webcam()
+    except Exception:
+        idx, name = None, None
+    if idx is None:
+        return DEFAULT_CAM
+    print(f"  웹캠 자동 선택: /dev/video{idx}  ({name})")
+    return idx
 
 
 def check_cam(index, probe_upto=4):
@@ -134,6 +215,11 @@ def check_cam(index, probe_upto=4):
 # 색도 구역도 필요 없기 때문이다. sign_control 에 이미 녹화돼 있던 두 단어다.
 COPY_GLOSS = {"똑같이": False, "좌우대칭": True}      # 값은 mirror 여부
 
+# 문장의 여닫이. 첫 박수로 열고 두 번째 박수로 닫는다. 그 밖에서 인식된 것은
+# 버린다 — 준비 동작이나 지나가는 손짓이 명령에 섞이지 않게 하려는 것이다.
+# sign_demo.py 가 쓰는 규약과 같다.
+DELIMITER_GLOSS = os.environ.get("SIGN_DELIMITER", "박수")
+
 
 def _has_command(glosses):
     """지금까지 모은 것으로 명령 하나를 만들 수 있는가.
@@ -169,25 +255,24 @@ def command_ready(glosses, zones):
 
 def collect_command(recognizer, zones, on_gloss=None, hint="",
                     max_glosses=MAX_GLOSSES):
-    """말이 되는 명령이 나올 때까지 모은다. (글로스, steps, 해석방식) 또는 None(취소).
+    """박수와 박수 사이를 한 문장으로 모아 해석한다.
+    (글로스, steps, 해석방식) 또는 None(취소).
+
+    끝나는 시점은 **닫는 박수**가 정한다. 명령이 되는 순간 바로 실행하던 예전
+    방식과 다르다 — 사람이 문장을 다 만들고 나서 실행되는 편이 예측 가능하다.
+    닫는 박수를 잊어도 max_glosses 에서 끊긴다.
 
     카메라 루프는 recognizer 가 통째로 돌린다 — 글로스마다 카메라를 열고 닫으면
     그 사이에 한 동작이 통째로 사라지고, 화면에 모인 글로스를 못 쌓아 보여준다.
     """
-    done = {}
-
-    def is_end(glosses):
-        r = command_ready(glosses, zones)
-        if r is None:
-            return False
-        done["r"] = r                  # 두 번 해석하지 않으려고 여기서 챙겨 둔다
-        return True
-
     gl = recognizer.recognize_sentence(
-        is_end, on_gloss=on_gloss, max_glosses=max_glosses, hint=hint)
+        lambda g: False,               # 끝은 박수가 정한다
+        on_gloss=on_gloss, max_glosses=max_glosses, hint=hint,
+        delimiter=DELIMITER_GLOSS)
     if gl is None:
         return None
-    steps, how = done.get("r", ([], "규칙"))
+    r = command_ready(gl, zones)
+    steps, how = r if r else ([], "규칙")
     return gl, steps, how
 
 
@@ -373,14 +458,22 @@ _COPY_CASES = [
 
 
 def _simulate(seq, zones=(1, 2, 3, 4), max_glosses=MAX_GLOSSES):
-    """글로스가 이 순서로 들어왔을 때 어디서 끊기는지. 카메라 없이 규칙만 본다.
+    """글로스가 이 순서로 들어왔을 때 무엇이 문장으로 남는지. 카메라 없이 확인한다.
 
-    recognize_sentence() 의 종료 판단과 같은 함수(command_ready)를 쓴다.
+    recognize_sentence() 의 여닫이 규칙을 그대로 흉내낸다:
+    첫 박수 전은 버리고, 두 번째 박수에서 끊는다.
     """
-    glosses = []
+    glosses, armed = [], False
     for g in seq:
+        if g == DELIMITER_GLOSS:
+            if armed:
+                break                      # 닫는 박수
+            armed, glosses = True, []      # 여는 박수 — 앞의 것은 버린다
+            continue
+        if not armed:
+            continue                       # 아직 안 열렸다
         glosses.append(g)
-        if command_ready(glosses, list(zones)) or len(glosses) >= max_glosses:
+        if len(glosses) >= max_glosses:
             break
     return glosses
 
@@ -396,22 +489,19 @@ def selftest():
         print(f"    {'OK ' if ok else '실패'} [{how:2s}] {text:28s} → {got}"
               + ("" if ok else f"   기대: {want}"))
 
-    print("\n  글로스 수집 (동사 없이, 말이 되는 순간 끊긴다)")
+    D = DELIMITER_GLOSS
+    print(f"\n  글로스 수집 ({D} 로 열고 {D} 로 닫는다)")
     for name, seq, want in [
-        ("색+구역이면 즉시", ["빨강", "3번구역", "놓다", "파랑"], ["빨강", "3번구역"]),
-        ("동사가 와도 상관없음", ["빨강", "놓다", "3번구역"], ["빨강", "놓다", "3번구역"]),
-        # 실측에서 실제로 났던 실패 — 동사가 첫 글로스로 잘못 끼어든 경우
-        ("동사 오인식 무시", ["조립하다", "빨강", "3번구역", "놓다"],
-         ["조립하다", "빨강", "3번구역"]),
-        ("동사 연속 오인식", ["조립하다", "조립하다", "파랑", "1번구역"],
-         ["조립하다", "조립하다", "파랑", "1번구역"]),
-        ("말이 안 되면 개수까지", ["놓다"] * 8, ["놓다"] * MAX_GLOSSES),
-        # 중간의 '들다' 는 아직 구역이 하나뿐이라 명령이 안 된다
-        ("구역→구역", ["3번구역", "들다", "1번구역", "놓다"],
-         ["3번구역", "들다", "1번구역"]),
-        # 티칭 안 된 구역은 명령이 안 되므로 계속 모은다
-        ("못 쓰는 구역은 계속", ["빨강", "5번구역", "3번구역"],
-         ["빨강", "5번구역", "3번구역"]),
+        ("여닫이 사이만", [D, "빨강", "3번구역", D, "파랑"], ["빨강", "3번구역"]),
+        ("열기 전 것은 버림", ["조립하다", "나사", D, "빨강", "3번구역", D],
+         ["빨강", "3번구역"]),
+        ("닫은 뒤 것은 안 모음", [D, "빨강", "3번구역", D, "놓다", "파랑"],
+         ["빨강", "3번구역"]),
+        ("동사가 섞여도 그대로", [D, "3번구역", "들다", "1번구역", "놓다", D],
+         ["3번구역", "들다", "1번구역", "놓다"]),
+        ("복제 명령", [D, "똑같이", D], ["똑같이"]),
+        ("안 열면 아무것도 안 모음", ["빨강", "3번구역", "놓다"], []),
+        ("닫기를 잊으면 개수까지", [D] + ["놓다"] * 8, ["놓다"] * MAX_GLOSSES),
     ]:
         got = _simulate(seq)
         ok = got == want
@@ -454,7 +544,7 @@ def main():
     if m == "selftest":
         sys.exit(1 if selftest() else 0)
     elif m == "cam":
-        idx = int(sys.argv[2]) if len(sys.argv) > 2 else int(os.environ.get("SIGN_CAM", DEFAULT_CAM))
+        idx = int(sys.argv[2]) if len(sys.argv) > 2 else resolve_cam()
         print(f"\n  카메라 {check_cam(idx)} 정상 — 프레임 수신 확인\n")
     elif m == "parse":
         if len(sys.argv) < 3:

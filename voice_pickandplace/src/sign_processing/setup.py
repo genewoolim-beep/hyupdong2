@@ -19,6 +19,7 @@ setup(
     entry_points={
         'console_scripts': [
             'get_keyword = sign_processing.get_keyword:main',
+            'webcam_publisher = sign_processing.webcam_publisher:main',
         ],
     },
 )

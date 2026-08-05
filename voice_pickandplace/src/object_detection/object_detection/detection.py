@@ -1,3 +1,6 @@
+import os
+import time
+
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -11,6 +14,9 @@ from object_detection.color_model import ColorModel
 # 두 프레임이 서로 다른 순간의 것이면, 물체나 팔이 움직이는 동안 엉뚱한 거리를 읽게 된다.
 MAX_SYNC_GAP_NS = 100_000_000   # 0.1초
 MAX_SYNC_RETRY = 10
+# 카메라가 멎었을 때 이만큼 기다렸다 포기한다. 무한히 매달리면 노드가 통째로
+# 응답 불능이 된다 (_wait_for_valid_data 주석 참고).
+DATA_TIMEOUT = float(os.environ.get("DATA_TIMEOUT", 5.0))
 
 
 class ObjectDetectionNode(Node):
@@ -18,9 +24,13 @@ class ObjectDetectionNode(Node):
         super().__init__('object_detection_node')
         self.img_node = ImgNode()
         self.model = self._load_model(model_name)
+        # 시작할 때는 넉넉히 기다린다. 카메라 없이 뜨면 어차피 아무것도 못 한다.
         self.intrinsics = self._wait_for_valid_data(
-            self.img_node.get_camera_intrinsic, "camera intrinsics"
+            self.img_node.get_camera_intrinsic, "카메라 내부파라미터", timeout=60.0
         )
+        if self.intrinsics is None:
+            raise SystemExit("카메라 내부파라미터를 못 받았습니다. "
+                             "RealSense 가 켜져 있고 USB 3.0 인지 확인하세요.")
         self.create_service(
             SrvDepthPosition,
             'get_3d_position',
@@ -98,6 +108,8 @@ class ObjectDetectionNode(Node):
         0(측정 실패)은 빼고 셉니다.
         """
         frame = self._wait_for_synced_depth()
+        if frame is None:
+            return None
         h, w = frame.shape[:2]
         if not (0 <= x < w and 0 <= y < h):
             self.get_logger().warn(f"Coordinates ({x},{y}) out of range.")
@@ -113,8 +125,11 @@ class ObjectDetectionNode(Node):
         color_ns = self.img_node.get_color_frame_stamp()
         gap = None
 
+        frame = None
         for _ in range(MAX_SYNC_RETRY):
-            frame = self._wait_for_valid_data(self.img_node.get_depth_frame, "depth frame")
+            frame = self._wait_for_valid_data(self.img_node.get_depth_frame, "깊이 프레임")
+            if frame is None:
+                return None
             depth_ns = self.img_node.get_depth_frame_stamp()
             if color_ns is None or depth_ns is None:
                 return frame
@@ -130,12 +145,23 @@ class ObjectDetectionNode(Node):
         )
         return frame
 
-    def _wait_for_valid_data(self, getter, description):
-        """getter 함수가 유효한 데이터를 반환할 때까지 spin 하며 재시도합니다."""
+    def _wait_for_valid_data(self, getter, description, timeout=DATA_TIMEOUT):
+        """유효한 데이터를 기다린다. 못 받으면 None 을 돌려준다.
+
+        예전에는 조건 없는 while 이라 카메라가 멎으면 **영원히** 돌았다.
+        실측 2026-08-05: RealSense 가 USB 2.0 으로 재연결돼 프레임이 끊기자
+        이 노드가 요청 하나를 받은 채로 멈췄고, 부르는 쪽은 매 명령마다
+        타임아웃을 먹었다. 카메라가 죽었으면 매달리지 말고 알려주는 편이 낫다.
+        """
+        t0 = time.time()
         data = getter()
         while data is None or (isinstance(data, np.ndarray) and not data.any()):
-            rclpy.spin_once(self.img_node)
-            self.get_logger().info(f"Retry getting {description}.")
+            if time.time() - t0 > timeout:
+                self.get_logger().error(
+                    f"{description} 를 {timeout:.0f}초 동안 못 받았습니다. "
+                    "카메라가 살아 있는지 확인하세요 (RealSense 는 USB 3.0 이어야 합니다).")
+                return None
+            rclpy.spin_once(self.img_node, timeout_sec=0.1)
             data = getter()
         return data
 
