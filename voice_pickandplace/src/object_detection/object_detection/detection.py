@@ -45,35 +45,68 @@ class ObjectDetectionNode(Node):
         return response
 
     def _compute_position(self, target):
-        """이미지를 처리해 객체의 카메라 좌표를 계산합니다."""
+        """그 색으로 보이는 것을 전부 찾아 (x, y, z, 각도) 를 이어붙여 돌려준다.
+
+        하나만 돌려주면 같은 색 블록이 여럿일 때 부르는 쪽이 고를 수가 없다.
+        실측 2026-08-04: 인간구역의 노란 블록을 읽으려는데 165mm 떨어진 다른
+        노란 블록이 더 크게 잡혀 그쪽이 왔다. 위치로 고르려면 후보가 다 필요하다.
+
+        믿을 만한 순으로 정렬돼 있으므로 앞 4개만 읽으면 예전과 같은 값이다 —
+        robot_control 처럼 하나만 쓰는 쪽은 고치지 않아도 그대로 동작한다.
+        못 찾으면 예전처럼 0 네 개를 돌려준다.
+        """
         rclpy.spin_once(self.img_node)
 
-        box, score = self.model.get_best_detection(self.img_node, target)
-        if box is None or score is None:
+        if hasattr(self.model, 'get_all_detections'):
+            found = self.model.get_all_detections(self.img_node, target)
+        else:                                   # YOLO 는 하나만 낸다
+            box, score = self.model.get_best_detection(self.img_node, target)
+            found = ([] if box is None or score is None else
+                     [(box, 0.0, score,
+                       (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)])
+        if not found:
             self.get_logger().warn("No detection found.")
             return 0.0, 0.0, 0.0, 0.0
-        
-        self.get_logger().info(f"Detection: box={box}, score={score}")
-        cx, cy = map(int, [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2])
-        cz = self._get_depth(cx, cy)
-        if cz is None:
-            self.get_logger().warn("Depth out of range.")
+
+        out = []
+        for box, ang, score, cx, cy in found:
+            # 중심은 마스크 무게중심이다(소수점 유지). 축정렬 박스 한가운데를 쓰면
+            # 한쪽으로 삐져나온 화소 몇 개에 중심이 끌려간다 — 35mm 블록이 약
+            # 86픽셀이라 5픽셀만 밀려도 2mm 오차다.
+            cz = self._get_depth(int(round(cx)), int(round(cy)))
+            if cz is None:
+                self.get_logger().warn(f"Depth out of range at ({cx:.0f}, {cy:.0f}) — skipped.")
+                continue
+            x, y, z = self._pixel_to_camera_coords(cx, cy, cz)
+            # 회전각도 함께 돌려준다. 기울어진 정사각 블록을 고정 각도로 물면
+            # 모서리만 잡혀 조일 때 돌아간다. YOLO 는 각도가 없어 0.
+            out += [x, y, z, float(ang)]
+            self.get_logger().info(
+                f"Detection: box={box}, score={score:.2f}, angle={ang:.0f}")
+
+        if not out:
+            self.get_logger().warn("No detection with valid depth.")
             return 0.0, 0.0, 0.0, 0.0
+        self.get_logger().info(f"{len(out) // 4} detection(s) for '{target}'")
+        return out
 
-        x, y, z = self._pixel_to_camera_coords(cx, cy, cz)
-        # 색 모델이면 회전각도 함께 돌려준다. 기울어진 정사각 블록을 고정
-        # 각도로 물면 모서리만 잡혀 조일 때 돌아간다. YOLO 는 각도가 없어 0.
-        ang = float(getattr(self.model, 'last_angle', 0.0))
-        return x, y, z, ang
+    def _get_depth(self, x, y, half=3):
+        """그 자리 둘레 작은 창에서 깊이의 중앙값을 읽습니다.
 
-    def _get_depth(self, x, y):
-        """픽셀 좌표의 depth 값을 안전하게 읽어옵니다."""
+        한 픽셀만 읽으면 그 화소가 깊이 구멍(0)이거나 잡음이면 그대로 속습니다.
+        블록 윗면은 평평하므로 둘레 몇 픽셀의 중앙값이 훨씬 안정적입니다.
+        0(측정 실패)은 빼고 셉니다.
+        """
         frame = self._wait_for_synced_depth()
-        try:
-            return frame[y, x]
-        except IndexError:
+        h, w = frame.shape[:2]
+        if not (0 <= x < w and 0 <= y < h):
             self.get_logger().warn(f"Coordinates ({x},{y}) out of range.")
             return None
+        patch = frame[max(0, y - half):y + half + 1, max(0, x - half):x + half + 1]
+        vals = patch[patch > 0]
+        if vals.size == 0:
+            return None
+        return float(np.median(vals))
 
     def _wait_for_synced_depth(self):
         """검출에 쓴 컬러 프레임과 촬영 시각이 가까운 깊이 프레임을 기다립니다."""

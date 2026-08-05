@@ -3,7 +3,9 @@
 구역 좌표 티칭 도구 — M0609 + RG2
 
   python3 teach_zones.py home          초기 자세로 이동, 그리퍼 열기
-  python3 teach_zones.py teach         구역 좌표 기록 (대화형)
+  python3 teach_zones.py teach         로봇구역 좌표 기록 (대화형)
+  python3 teach_zones.py teach human   인간구역 좌표 기록
+  python3 teach_zones.py scan          순회 경유점 4개 기록
   python3 teach_zones.py show          저장값 출력
   python3 teach_zones.py verify        저장된 구역을 저속으로 순회
   python3 teach_zones.py free          순응 모드 on/off (손으로 밀어 움직이기)
@@ -12,6 +14,13 @@
   · 블록을 그리퍼에 물린 채로 위치시킨다.
     빈 손으로 잡으면 실제 놓이는 자리가 블록 두께만큼 어긋난다.
   · 자세(rx,ry,rz)도 함께 저장된다. 매번 같은 방향으로 놓기 위해서다.
+
+구역 세 가지
+  로봇구역(zones)       로봇이 블록을 놓는 곳. 자세까지 쓴다.
+  인간구역(human_zones) 사람이 배치하는 곳. 로봇은 보기만 해서 x,y 만 쓴다.
+  프리구역              둘 중 어디에도 안 속하는 나머지. 따로 티칭하지 않는다 —
+                        '어느 구역에도 가깝지 않은 자리'로 정의되기 때문이다.
+                        로봇은 여기 있는 블록만 집어간다.
 """
 import os
 import sys
@@ -106,25 +115,38 @@ def mode_free(on):
         print("\n순응 모드 OFF — 팔이 다시 굳었습니다.\n")
 
 
-def mode_teach():
+def mode_teach(which="robot"):
+    """which: robot  로봇이 블록을 놓을 구역 (기존)
+              human  사람이 배치하는 구역. 로봇은 보기만 하므로 자세는 안 쓰고
+                     x,y 만 쓴다 — 검출된 블록이 어느 칸인지 가리기 위해서다.
+    """
     data = load()
+    key = "zones" if which == "robot" else "human_zones"
+    data.setdefault(key, {})
+    title = "로봇구역" if which == "robot" else "인간구역"
+
     print("\n" + "=" * 56)
-    print(" 구역 좌표 티칭")
+    print(f" {title} 좌표 티칭")
     print("=" * 56)
-    print("  블록을 그리퍼에 물린 채로 각 구역에 위치시키세요.")
+    if which == "robot":
+        print("  블록을 그리퍼에 물린 채로 각 구역에 위치시키세요.")
+        print("  빈 손으로 잡으면 실제 놓이는 자리가 블록 두께만큼 어긋납니다.")
+    else:
+        print("  각 칸의 한가운데에 그리퍼 끝을 대세요.")
+        print("  여기에 놓지는 않으므로 자세(rx,ry,rz)는 아무래도 좋습니다.")
     print("  Enter  현재 위치 기록 / s  건너뛰기 / q  종료\n")
 
     for i in range(1, N_ZONES + 1):
-        cur = data["zones"].get(i)
+        cur = data[key].get(i)
         mark = f"  (기존값 {cur})" if cur else ""
-        ans = input(f"  [{i}번 구역] 위치시킨 뒤 Enter{mark} > ").strip().lower()
+        ans = input(f"  [{title} {i}번] 위치시킨 뒤 Enter{mark} > ").strip().lower()
         if ans == "q":
             break
         if ans == "s":
             print("     건너뜀")
             continue
         p = posx_now()
-        data["zones"][i] = p
+        data[key][i] = p
         print(f"     기록  {p}")
 
     data["home"] = JREADY
@@ -133,18 +155,76 @@ def mode_teach():
     print()
 
 
+N_SCAN = 5                     # 경유점 개수. 1번은 인간구역 관측, 나머지는 프리구역 훑기
+
+
+def mode_scan():
+    """관심 영역 위를 도는 경유점을 기록한다.
+
+    넓게 한 번에 보는 관측 자세를 없애고, 낮게 호버링하며 한 바퀴 도는 방식으로
+    바꿨다. 멀리서 한 장에 다 담으면 블록이 작게 잡히고 비스듬히 보여 중심이
+    밀린다. 가까이서 나눠 보면 그 두 문제가 같이 사라진다.
+
+    자세는 기울어도 된다 — 검출·파지 때 level_att() 가 수직으로 편다.
+    """
+    data = load()
+    data.setdefault("scan_path", [])
+    print("\n" + "=" * 56)
+    print(" 순회 경유점 티칭")
+    print("=" * 56)
+    print("  1번  인간구역 4칸이 한 화면에 다 들어오는 높은 자세")
+    print("  2~5번 프리구역 위를 낮게 도는 자세")
+    print("  각 점에서 카메라에 보이는 것만 검출됩니다 — 겹치게 잡는 편이 안전합니다.")
+    print("  주의: 카메라는 그리퍼에서 (+33, +60)mm 떨어져 있어 팔 위치와 보는 자리가 다릅니다.")
+    print("  Enter  현재 위치 기록 / s  건너뛰기 / q  종료\n")
+
+    pts = list(data["scan_path"])
+    for i in range(N_SCAN):
+        cur = pts[i] if i < len(pts) else None
+        mark = f"  (기존값 {cur})" if cur else ""
+        what = "인간구역 관측" if i == 0 else "프리구역 훑기"
+        ans = input(f"  [{i + 1}번 경유점 — {what}] 자세를 잡은 뒤 Enter{mark} > ").strip().lower()
+        if ans == "q":
+            break
+        if ans == "s":
+            print("     건너뜀")
+            continue
+        p = posx_now()
+        if i < len(pts):
+            pts[i] = p
+        else:
+            pts.append(p)
+        print(f"     기록  {p}")
+
+    data["scan_path"] = pts
+    # 관측 자세는 더 이상 쓰지 않는다. 남겨두면 어느 쪽이 쓰이는지 헷갈린다.
+    for k in ("observe_human", "observe_free"):
+        data.pop(k, None)
+    save(data)
+    print(f"\n  확인:  python3 block_sort.py scan\n")
+
+
 def mode_show():
     data = load()
     print(f"\n{ZONES_YAML}")
     print(f"  home        {data.get('home')}")
     print(f"  lift_height {data.get('lift_height')} mm")
-    z = data.get("zones", {})
-    if not z:
-        print("  zones       (비어 있음 — teach 를 먼저 실행하세요)")
-    else:
-        print("  zones")
+    for key, label, hint in [("zones", "로봇구역", "teach"),
+                             ("human_zones", "인간구역", "teach human")]:
+        z = data.get(key) or {}
+        if not z:
+            print(f"  {key:12s}(비어 있음 — {hint} 를 실행하세요)")
+            continue
+        print(f"  {key}   [{label}]")
         for i in sorted(z):
             print(f"    {i}: {z[i]}")
+    pts = data.get("scan_path") or []
+    if not pts:
+        print("  scan_path   (비어 있음 — scan 을 실행하세요)")
+    else:
+        print("  scan_path   [순회 경유점]")
+        for i, p in enumerate(pts, 1):
+            print(f"    {i}: {p}")
     print()
 
 
@@ -179,7 +259,12 @@ def main():
         if m == "home":
             mode_home()
         elif m == "teach":
-            mode_teach()
+            which = sys.argv[2] if len(sys.argv) > 2 else "robot"
+            if which not in ("robot", "human"):
+                sys.exit("사용법: teach [robot|human]")
+            mode_teach(which)
+        elif m == "scan":
+            mode_scan()
         elif m == "show":
             mode_show()
         elif m == "verify":
