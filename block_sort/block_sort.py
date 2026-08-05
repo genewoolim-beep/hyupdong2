@@ -159,6 +159,52 @@ try:
 except ImportError as e:
     sys.exit(f"DSR_ROBOT2 임포트 실패: {e}\n로봇 드라이버가 떠 있는지 확인하세요.")
 
+
+# ───────────────────────── signbot_admin 연동 ─────────────────────────
+# --admin 을 붙였을 때만 관리자 대시보드로 상태를 쏜다. 기본은 조용히 아무것도
+# 안 한다 — 다른 팀원이 --admin 없이 그대로 써도 동작이 달라지지 않는다.
+ADMIN_URL = os.environ.get("SIGN_ADMIN_URL", "http://localhost:5000")
+USE_ADMIN = "--admin" in sys.argv
+
+
+def _admin_post(path, payload):
+    if not USE_ADMIN:
+        return
+    import json
+    import threading
+    import urllib.request
+
+    def _send():
+        try:
+            body = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                f"{ADMIN_URL}{path}", data=body,
+                headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=1.0)
+        except Exception:
+            pass
+    threading.Thread(target=_send, daemon=True).start()
+
+
+def push_zone(space, zone_num, color):
+    """구역 하나의 색을 signbot_admin에 반영한다. space: robot | human"""
+    _admin_post(f"/api/zones/{space}", {"zone": f"{zone_num}번구역", "color": color})
+
+
+def push_zones(space, zone_colors, all_zone_nums):
+    """구역 전체를 한 번에 반영한다. zone_colors에 없는 번호는 빈 구역으로 민다."""
+    for i in all_zone_nums:
+        push_zone(space, i, zone_colors.get(i))
+
+
+def push_robot_status(**fields):
+    _admin_post("/api/robot/status", fields)
+
+
+def push_debug(level, source, message):
+    _admin_post("/api/debug", {"level": level, "source": source, "message": message})
+
+
 def wait_idle(timeout=20.0):
     """모션이 끝나 STANDBY 가 될 때까지 기다린다.
 
@@ -554,6 +600,9 @@ class BlockSort(Node):
         """
         # 한 바퀴 다 돈다 — 인간구역 4칸을 다 읽어야 계획을 세울 수 있다.
         seen, stock, occ, _ = self.patrol()
+        # 전체 순회라 인간구역/로봇구역 둘 다 지금 상태 그대로다 — 대시보드에 반영.
+        push_zones("human", seen, sorted(self.human_zones()))
+        push_zones("robot", occ, sorted(self.cfg["zones"]))
         if not seen:
             self.get_logger().error("인간구역에서 아무 블록도 못 찾았습니다.")
             self.go_home()
@@ -601,6 +650,7 @@ class BlockSort(Node):
                 f"프리구역에 부족한 색: {', '.join(short)} — 그 칸은 건너뜁니다")
 
         ok = True
+        placed = {}
         for hz_i, dst, color in plan:
             lst = stock.get(color) or []
             if not lst:
@@ -612,8 +662,13 @@ class BlockSort(Node):
             self.get_logger().info(
                 f"── 인간{hz_i}번의 {color} → 로봇{dst}번  "
                 f"(프리 ({xy[0]:.0f}, {xy[1]:.0f}) 에서 집기) ──")
-            if not self.pick_cached(color, xy, dst):
+            if self.pick_cached(color, xy, dst):
+                placed[dst] = color
+            else:
                 ok = False
+        if placed:
+            # 다시 순회하지 않고, 이번에 놓은 것만 원래 점유 상태에 얹어서 반영한다.
+            push_zones("robot", {**occ, **placed}, sorted(self.cfg["zones"]))
         self.go_home()
         self.get_logger().warn(f"복제 {'완료' if ok else '일부 실패'}")
         return ok
@@ -1218,6 +1273,8 @@ class BlockSort(Node):
             self.place(zone)
             self.go_home()
             self.get_logger().info(f"완료: {target}번구역의 {color} → {zone}번")
+            push_zone("robot", target, None)     # 원래 있던 자리는 비었다
+            push_zone("robot", zone, color)
             return True
 
         # 색을 지정한 경우. 관심 영역을 돌다가 그 색을 프리구역에서 보면 멈춘다.
@@ -1233,6 +1290,8 @@ class BlockSort(Node):
             + (f" — {at}번 경유점" if at else ""))
         ok = self.pick_cached(target, xy, zone)
         self.go_home()
+        if ok:
+            push_zone("robot", zone, target)
         return ok
 
     def run_sign(self, once=False):
@@ -1302,6 +1361,8 @@ def main():
         sys.exit(__doc__)
     m = sys.argv[1]
     node = BlockSort()
+    push_robot_status(connected=True, model="Doosan M0609",
+                       last_command=" ".join(sys.argv[1:]))
     try:
         if m == "home":
             node.go_home()
@@ -1346,6 +1407,8 @@ def main():
                            int(sys.argv[3]) if len(sys.argv) > 3 else 3)
         elif m in ("scan", "read-human", "read-free"):
             seen, stock, occ, _ = node.patrol()
+            push_zones("human", seen, sorted(node.human_zones()))
+            push_zones("robot", occ, sorted(node.cfg["zones"]))
             node.go_home()
             print(f"\n  인간구역 = {seen or '읽기 실패'}")
             counts = {c: len(v) for c, v in stock.items()}
@@ -1370,7 +1433,11 @@ def main():
                 node.run_one(as_target(s[0]), int(s[1]))
         else:
             sys.exit(__doc__)
+    except Exception as e:
+        push_debug("error", "block_sort", f"'{' '.join(sys.argv[1:])}' 실행 중 오류: {e}")
+        raise
     finally:
+        push_robot_status(connected=False)
         rclpy.shutdown()
 
 

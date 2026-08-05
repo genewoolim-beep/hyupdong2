@@ -238,6 +238,25 @@ source ~/doosan-voice-pickandplace/voice_pickandplace/install/setup.bash   # od_
 파지 정확도를 좌우하는 값들은 코드 상단 주석에 실측 근거와 함께 적혀 있다.
 판이나 조명이 바뀌면 `center` → `calib-zones` 순으로 다시 잰다.
 
+### signbot_admin 연동
+
+`--admin` 을 뒤에 붙이면 `signbot_admin` 대시보드(기본 `http://localhost:5000`,
+`SIGN_ADMIN_URL` 로 변경 가능)로 상태를 쏜다. 안 붙이면 지금까지와 동일하게 동작한다.
+
+```bash
+python3 block_sort.py scan --admin          # 순회 결과를 로봇/인간 구역 현황에 반영
+python3 block_sort.py copy-mirror --admin   # 순회 + 배치 결과 모두 반영
+python3 block_sort.py pick 빨강 3 --admin    # 옮긴 구역 하나만 반영
+```
+
+- 시작할 때 `POST /api/robot/status` 로 `connected: true` 를 보내고, 끝나면(성공이든
+  실패든) `connected: false` 를 보낸다. 1회성 스크립트라 "연결됨"은 지금 이 순간
+  명령을 실행 중이라는 뜻이다.
+- `scan`/`read-human`/`read-free`, `copy`/`copy-mirror`처럼 **전체 순회**를 하는 명령만
+  구역 전체를 갱신한다. `pick` 처럼 부분 순회(`patrol(want=...)`)를 쓰는 경로는 옮긴
+  구역 하나만 콕 집어 갱신한다 — 못 본 구역까지 비었다고 잘못 반영하지 않기 위해서다.
+- 실행 중 예외가 나면 `POST /api/debug` 로 오류 메시지를 남긴다.
+
 ---
 
 ## 공통 요구사항
