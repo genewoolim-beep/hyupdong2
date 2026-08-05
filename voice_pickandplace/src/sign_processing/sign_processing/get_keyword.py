@@ -71,9 +71,16 @@ class GetKeyword(Node):
 def main():
     rclpy.init()
     node = GetKeyword()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # 카메라는 서비스 호출마다 열고 닫지 않는다(창이 깜빡이고 여는 데만
+        # 1초 넘게 걸린다). 대신 노드가 내려갈 때 여기서 한 번 정리한다.
+        node.recognizer.close()
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":

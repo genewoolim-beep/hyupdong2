@@ -5,12 +5,13 @@
 # 조명이 바뀔 때마다 다시 빌드하지 않고 그 파일만 고쳐서 대응하기 위해서다.
 import json
 import os
+import time
 
 import cv2
 import numpy as np
 from ament_index_python.packages import get_package_share_directory
 
-from object_detection.detection_utils import collect_frames, consensus_box
+from object_detection.detection_utils import collect_frames, consensus_boxes
 
 PACKAGE_NAME = 'object_detection'
 CONFIG_PATH = os.path.join(
@@ -38,6 +39,13 @@ def _load_config(path):
 
 
 COLOR_HSV_RANGES, _FILTERS, _FRAMES = _load_config(CONFIG_PATH)
+
+# 색마다 다시 찍지 않고 이 시간 동안은 같은 촬영을 돌려 쓴다. 자세한 이유는
+# ColorModel._frames() 주석 참고.
+# 0.5초로 잡았더니 색 하나 처리에 0.6초가 걸려 매번 만료됐다(6색 3.9초).
+# 6색을 한 번의 촬영으로 덮으려면 촬영 0.4초 + 색당 처리 0.2초 × 6 = 1.6초 이상.
+# 팔이 움직이면 장면이 바뀌지만, 이동에는 대기까지 2초 넘게 걸려 그 사이 만료된다.
+FRAME_CACHE_SEC = float(os.environ.get('FRAME_CACHE_SEC', 0.4))
 
 MIN_AREA = _FILTERS['min_area']
 MAX_AREA_RATIO = _FILTERS['max_area_ratio']
@@ -84,18 +92,32 @@ def keep_top_face(depth, mask):
     """
     if depth is None or depth.shape[:2] != mask.shape[:2]:
         return mask
-    vals = depth[(mask > 0) & (depth > 0)]
-    if vals.size < 200:
-        return mask
-    # 윗면은 그 색 영역에서 가장 가까운 쪽이다. 잡음에 강하게 하위 20% 로 잡는다.
-    top = float(np.percentile(vals, 20))
-    band = ((depth > top - TOP_BAND) & (depth < top + TOP_BAND)).astype(np.uint8) * 255
-    out = cv2.bitwise_and(mask, band)
-    return out if cv2.countNonZero(out) >= 200 else mask
+
+    # 덩어리마다 따로 자른다. 마스크 전체를 한 번에 자르면 같은 색 블록이 여럿일 때
+    # 가장 가까운 것만 남고 나머지가 통째로 사라진다.
+    # 실측 2026-08-04: 관측 자세에서 빨간 블록 4개의 깊이가 671~872mm 로 벌어져,
+    # 한 번에 자르니 671mm 짜리 하나만 살아남았다. 덩어리별로 자르니 4개 다 남았다.
+    n, labels = cv2.connectedComponents((mask > 0).astype(np.uint8))
+    out = np.zeros_like(mask)
+    for i in range(1, n):
+        comp = np.where(labels == i, np.uint8(255), np.uint8(0))
+        vals = depth[(comp > 0) & (depth > 0)]
+        if vals.size < 200:
+            out |= comp                 # 깊이가 모자라면 판단을 미루고 그대로 살린다
+            continue
+        # 윗면은 그 덩어리에서 가장 가까운 쪽이다. 잡음에 강하게 하위 20% 로 잡는다.
+        top = float(np.percentile(vals, 20))
+        band = ((depth > top - TOP_BAND) & (depth < top + TOP_BAND)).astype(np.uint8) * 255
+        g = cv2.bitwise_and(comp, band)
+        out |= g if cv2.countNonZero(g) >= 200 else comp
+    return out if cv2.countNonZero(out) else mask
 
 
-def detect_color_box(hsv, ranges, max_area, depth=None):
-    """HSV 이미지 한 장에서 그 색의 블록 하나를 찾아 (박스, 통계) 를 돌려준다.
+def detect_color_boxes(hsv, ranges, max_area, depth=None):
+    """HSV 이미지 한 장에서 그 색으로 보이는 블록을 **전부** 찾는다.
+
+    돌려주는 것은 ([(박스, 각도), ...], 통계) 이고, 큰 것부터 정렬돼 있다.
+    하나만 돌려주면 같은 색 블록이 여럿일 때 부르는 쪽이 위치로 고를 수가 없다.
 
     ColorModel 과 color_view 가 같은 결과를 보도록 검출 과정을 여기 한 곳에 둔다.
     함께 돌려주는 통계는 못 찾았을 때 그 이유를 로그로 남기기 위한 것이고,
@@ -120,56 +142,101 @@ def detect_color_box(hsv, ranges, max_area, depth=None):
         'angle': 0.0,
     }
 
-    candidates = block_candidates(contours, max_area)
-    if not candidates:
-        return None, stats
+    found = []
+    for c in sorted(block_candidates(contours, max_area), key=cv2.contourArea,
+                    reverse=True):
+        # 정사각 블록은 90° 대칭이므로 0~90 으로 접어서 쓴다.
+        (_, _), (rw, rh), ang = cv2.minAreaRect(c)
+        if rw < rh:
+            ang += 90
+        x, y, w, h = cv2.boundingRect(c)
 
-    best = max(candidates, key=cv2.contourArea)
-    # 정사각 블록은 90° 대칭이므로 0~90 으로 접어서 쓴다.
-    (_, _), (rw, rh), ang = cv2.minAreaRect(best)
-    if rw < rh:
-        ang += 90
-    stats['angle'] = float(ang % 90)
+        # 중심은 **마스크의 무게중심**으로 잡는다. 축정렬 박스의 한가운데를 쓰면
+        # 한쪽으로 삐져나온 화소 몇 개가 박스를 늘리고 중심을 그 절반만큼 민다.
+        # 무게중심은 모든 화소를 평균하므로 그런 이상치에 거의 흔들리지 않고,
+        # 정사각 윗면처럼 대칭인 도형에서는 정확히 한가운데가 된다.
+        # 소수점까지 살린다 — 35mm 블록이 약 86픽셀이라 1픽셀이 0.4mm다.
+        m = cv2.moments(c)
+        if m['m00'] > 0:
+            cx, cy = m['m10'] / m['m00'], m['m01'] / m['m00']
+        else:
+            cx, cy = x + w / 2.0, y + h / 2.0
+        found.append(([float(x), float(y), float(x + w), float(y + h)],
+                      float(ang % 90), float(cx), float(cy)))
+    if found:
+        stats['angle'] = found[0][1]
+    return found, stats
 
-    x, y, w, h = cv2.boundingRect(best)
-    return [float(x), float(y), float(x + w), float(y + h)], stats
+
+def detect_color_box(hsv, ranges, max_area, depth=None):
+    """가장 큰 것 하나만. 여러 개가 필요 없는 호출부(color_view 등)를 위해 남긴다."""
+    found, stats = detect_color_boxes(hsv, ranges, max_area, depth)
+    return (found[0][0] if found else None), stats
 
 
 class ColorModel:
     def __init__(self):
         self.last_angle = 0.0      # 마지막 검출의 회전각 (도, 0~90)
+        self._cache = None         # (시각, 프레임들, 깊이) — _frames() 참고
 
-    def get_best_detection(self, img_node, target):
+    def get_all_detections(self, img_node, target):
+        """그 색으로 보이는 블록을 전부 [(박스, 각도, 신뢰도), ...] 로 돌려준다.
+
+        신뢰도가 높은 순이라 첫 번째만 쓰면 get_best_detection() 과 같다.
+        여러 개가 필요한 이유는 detection_utils.consensus_boxes() 주석 참고.
+        """
         key = target.strip().lower()
         ranges = COLOR_HSV_RANGES.get(key) or COLOR_HSV_RANGES.get(target.strip())
         if ranges is None:
             print(f"'{target}' is not a known color. known: {sorted(set(COLOR_HSV_RANGES))}")
             self.last_angle = 0.0
-            return None, None
+            return []
 
         # 한 장만 보면 그 순간의 그림자나 반사광에 그대로 속는다.
         # 짧게 여러 장을 모아서 매번 같은 자리에 나오는 것만 인정한다.
-        frames = collect_frames(img_node, FRAME_DURATION)
+        frames, depth = self._frames(img_node)
         if not frames:
             print("No frames captured from the camera.")
-            return None, None
-
-        depth = img_node.get_depth_frame()
-        boxes, angles = [], []
+            return []
+        items = []
         for frame in frames:
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             max_area = hsv.shape[0] * hsv.shape[1] * MAX_AREA_RATIO
-            box, st = detect_color_box(hsv, ranges, max_area, depth)
-            if box is not None:
-                boxes.append(box)
-                angles.append(st['angle'])
-        # 각도도 프레임마다 조금씩 흔들리므로 중앙값을 쓴다.
-        self.last_angle = float(np.median(angles)) if angles else 0.0
+            found, _ = detect_color_boxes(hsv, ranges, max_area, depth)
+            items.extend(found)
 
-        box, hit_ratio = consensus_box(boxes, len(frames), IOU_THRESHOLD, MIN_HIT_RATIO)
-        if box is None:
+        out = consensus_boxes(items, len(frames), IOU_THRESHOLD, MIN_HIT_RATIO)
+        if not out:
             print(f"'{target}' was not seen consistently across {len(frames)} frames.")
             self.last_angle = 0.0
-            return None, None
+            return []
+        self.last_angle = out[0][1]
+        return out
 
-        return box, hit_ratio
+    def _frames(self, img_node):
+        """촬영을 색마다 새로 하지 않고 짧은 동안 돌려 쓴다.
+
+        부르는 쪽은 한 자리에 서서 아는 색을 전부 물어본다(현재 6색). 색마다
+        FRAME_DURATION(0.4초)씩 새로 모으면 그것만 2.4초다. 실측 2026-08-04:
+        경유점 한 곳에서 6색을 재는 데 11초가 걸렸다.
+        같은 순간의 같은 화면을 보는 것이므로 돌려 써도 결과가 달라지지 않는다.
+
+        팔이 움직이면 화면이 바뀌므로 유효기간을 짧게 둔다. 검출은 팔이 멎은
+        뒤에만 하므로(SETTLE_SEC) 이 창 안에서는 장면이 고정돼 있다.
+        """
+        now = time.time()
+        if self._cache and now - self._cache[0] < FRAME_CACHE_SEC:
+            return self._cache[1], self._cache[2]
+        frames = collect_frames(img_node, FRAME_DURATION)
+        depth = img_node.get_depth_frame()
+        self._cache = (now, frames, depth)
+        return frames, depth
+
+    def get_best_detection(self, img_node, target):
+        """가장 믿을 만한 것 하나. 예전 호출부를 그대로 두기 위해 남긴다."""
+        out = self.get_all_detections(img_node, target)
+        if not out:
+            return None, None
+        box, ang, hit = out[0]
+        self.last_angle = ang
+        return box, hit

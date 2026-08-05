@@ -187,15 +187,18 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 터미널 4개로 나눠 실행한다.
 
 ```bash
-# 1) 로봇 드라이버
-ros2 launch m0609_rg2_bringup m0609_rg2.launch.py
+# 1) 로봇 드라이버 — 런치 파일 이름은 bringup.launch.py 다.
+ros2 launch m0609_rg2_bringup bringup.launch.py mode:=real host:=192.168.1.100
+# 실물 없이 확인만 할 때는 mode:=virtual (기본값)
 
 # 2) RealSense — align_depth 가 켜져야 aligned_depth_to_color 토픽이 나온다.
 #    이게 없으면 검출 노드가 깊이를 못 읽고 계속 재시도만 한다.
-ros2 launch realsense2_camera rs_align_depth_launch.py \
+#    rs_align_depth_launch.py 는 이 버전의 realsense2_camera 에 없다. rs_launch.py 에
+#    align_depth.enable:=true 를 주면 같은 토픽이 나온다 (2026-08-04 실측 확인).
+ros2 launch realsense2_camera rs_launch.py \
     depth_module.depth_profile:=848x480x30 \
     rgb_camera.color_profile:=1280x720x30 \
-    align_depth.enable:=true initial_reset:=true
+    align_depth.enable:=true
 
 # 3) 검출 + 로봇 제어
 ros2 run object_detection object_detection

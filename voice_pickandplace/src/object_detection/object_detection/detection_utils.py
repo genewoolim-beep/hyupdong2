@@ -39,6 +39,47 @@ def collect_frames(img_node, duration, max_frames=30):
     return list(frames.values())
 
 
+def consensus_boxes(items, frame_count, iou_threshold, min_hit_ratio):
+    """여러 프레임에서 나온 (박스, 각도, 무게중심x, 무게중심y) 들을 겹치는 것끼리
+    묶어, 일관되게 나타난 무리를 **전부** 돌려준다.
+    [(박스, 각도, 신뢰도, 중심x, 중심y), ...]
+
+    consensus_box() 는 가장 큰 무리 하나만 골랐다. 같은 색 블록이 여럿이면
+    나머지가 통째로 버려져서, 부르는 쪽이 '어느 것'인지 고를 수가 없었다.
+    실측 2026-08-04: 인간구역의 노란 블록을 집으려는데 165mm 떨어진 다른
+    노란 블록이 더 크게 잡혀 그쪽이 돌아왔다. 위치로 고르려면 후보가 다 필요하다.
+
+    신뢰도가 높은(여러 프레임에 걸쳐 꾸준히 보인) 순으로 정렬해 돌려주므로,
+    첫 번째만 쓰면 예전 consensus_box() 와 같은 결과가 된다.
+    """
+    if not items or frame_count == 0:
+        return []
+
+    groups = []
+    for it in items:
+        for g in groups:
+            if iou(it[0], g[0][0]) >= iou_threshold:
+                g.append(it)
+                break
+        else:
+            groups.append([it])
+
+    out = []
+    for g in groups:
+        hit = len(g) / frame_count
+        if hit < min_hit_ratio:
+            continue
+        mean_box = np.mean([b for b, _, _, _ in g], axis=0).tolist()
+        # 각도는 프레임마다 흔들리므로 중앙값을 쓴다 (평균은 0/90 경계에서 튄다).
+        ang = float(np.median([a for _, a, _, _ in g]))
+        # 무게중심도 중앙값으로. 한 프레임이 튀어도 끌려가지 않는다.
+        cx = float(np.median([x for _, _, x, _ in g]))
+        cy = float(np.median([y for _, _, _, y in g]))
+        out.append((mean_box, ang, hit, cx, cy))
+    out.sort(key=lambda t: -t[2])
+    return out
+
+
 def consensus_box(boxes, frame_count, iou_threshold, min_hit_ratio):
     """여러 프레임에서 나온 박스들 중 가장 일관되게 나타난 하나로 합친다.
 
