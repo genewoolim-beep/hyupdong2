@@ -17,12 +17,25 @@ MAX_SYNC_RETRY = 10
 # 카메라가 멎었을 때 이만큼 기다렸다 포기한다. 무한히 매달리면 노드가 통째로
 # 응답 불능이 된다 (_wait_for_valid_data 주석 참고).
 DATA_TIMEOUT = float(os.environ.get("DATA_TIMEOUT", 5.0))
+# 팔 자세를 읽을 토픽. 여기 값이 바뀌면 프레임 캐시가 자세를 못 보고
+# 예전처럼 시간으로만 막는다 (동작은 유지, 속도만 손해).
+JOINT_TOPIC = os.environ.get("JOINT_TOPIC", "/dsr01/joint_states")
 
 
 class ObjectDetectionNode(Node):
     def __init__(self, model_name = 'color'):
         super().__init__('object_detection_node')
         self.img_node = ImgNode()
+        # 프레임 캐시를 '팔이 그대로인가' 로 무효화하기 위한 관절 상태.
+        # 시간으로 막으면 6색을 덮을 만큼 길게 잡을 수 없어 캐시가 매번 만료됐다.
+        # 자세로 막으면 한 자리에서는 촬영 1회를 공유하고, 팔이 움직이면 바로 버린다.
+        # 자세한 이유는 color_model.ColorModel._frames() 주석 참고.
+        self._joints = None
+        from sensor_msgs.msg import JointState
+        self.create_subscription(
+            JointState, JOINT_TOPIC,
+            lambda m: setattr(self, "_joints",
+                              tuple(round(v, 3) for v in m.position)), 1)
         self.model = self._load_model(model_name)
         # 시작할 때는 넉넉히 기다린다. 카메라 없이 뜨면 어차피 아무것도 못 한다.
         self.intrinsics = self._wait_for_valid_data(
@@ -68,9 +81,12 @@ class ObjectDetectionNode(Node):
         rclpy.spin_once(self.img_node)
 
         if hasattr(self.model, 'get_all_detections'):
-            found = self.model.get_all_detections(self.img_node, target)
+            rclpy.spin_once(self, timeout_sec=0.0)   # 최신 관절 반영
+            found = self.model.get_all_detections(self.img_node, target,
+                                                  pose_key=self._joints)
         else:                                   # YOLO 는 하나만 낸다
-            box, score = self.model.get_best_detection(self.img_node, target)
+            box, score = self.model.get_best_detection(self.img_node, target,
+                                                       pose_key=self._joints)
             found = ([] if box is None or score is None else
                      [(box, 0.0, score,
                        (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)])

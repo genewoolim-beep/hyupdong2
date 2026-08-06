@@ -135,6 +135,12 @@ MOVE_RETRY_WAIT = float(os.environ.get("MOVE_RETRY_WAIT", 0.5))
 # 실측 2026-08-04: 옮기는 도중 다른 블록을 건드리는 일이 있었다.
 TRANSIT_Z = float(os.environ.get("TRANSIT_Z", 250.0))
 
+# 빈 손으로 블록 위에 접근할 때의 최소 높이(mm). 검출을 마친 자리가 이보다
+# 높으면 그 높이를 그대로 쓰고, 낮으면 여기까지만 올린다.
+# 블록 윗면이 판 위 35mm 이므로 120mm 면 손가락 밑으로 여유가 충분하다.
+# 이송(TRANSIT_Z=250)과 달리 물린 블록이 없어 여유가 덜 필요하다.
+APPROACH_Z = float(os.environ.get("APPROACH_Z", 120.0))
+
 # 순회에서 봐 둔 자리와 다시 봤을 때의 자리가 이보다 벌어지면 다른 블록으로 본다.
 # 실측 2026-08-04: 한계가 없어 250mm 떨어진 같은 색을 집으러 갔다.
 CACHE_TOLERANCE = 70.0
@@ -147,6 +153,12 @@ CACHE_TOLERANCE = 70.0
 # 경유점을 지우거나 더하면 이 값도 같이 맞춰야 한다. 안 그러면 재순회 범위가
 # 통째로 밀린다.
 RESCAN_SKIP = int(os.environ.get("RESCAN_SKIP", 2))
+
+# 로봇구역 배치를 확인할 때 들르는 경유점(0-based). 전체 순회 대신 여기만 본다.
+# 실측 시야중심: 2번 경유점[297,166]이 안쪽(로봇3·4), 3번[518,129]이 바깥(로봇1·2).
+# 경유점을 바꾸면 이 값도 같이 봐야 한다.
+ZONE_SURVEY_POINTS = [int(v) for v in
+                      os.environ.get("ZONE_SURVEY_POINTS", "1,2").split(",") if v.strip()]
 
 GRIPPER_NAME = "rg2"
 TOOLCHARGER_IP, TOOLCHARGER_PORT = "192.168.1.1", "502"
@@ -295,6 +307,20 @@ def push_robot_status(**fields):
 
 def push_debug(level, source, message):
     _admin_post("/api/debug", {"level": level, "source": source, "message": message})
+
+
+def push_stock(colors, detail=""):
+    """어떤 색의 프리 재고가 없는지 대시보드에 띄운다.
+
+    터미널 로그만 남기면 화면만 보는 사람은 '왜 저 칸이 비었지' 를 알 수 없다.
+    재고 부족은 고장이 아니라 **사람이 블록을 놓아주면 풀리는 것**이라, 화면에
+    나와야 조치로 이어진다. warn 으로 보내 debug 패널에서 눈에 띄게 한다.
+    """
+    if not colors:
+        return
+    names = colors if isinstance(colors, str) else ", ".join(colors)
+    push_debug("warn", "재고",
+               f"프리구역에 {names} 재고가 없습니다" + (f" — {detail}" if detail else ""))
 
 
 def wait_idle(timeout=20.0):
@@ -765,6 +791,7 @@ class BlockSort(Node):
         if short:
             self.get_logger().warn(
                 f"프리구역에 부족한 색: {', '.join(short)} — 그 칸은 건너뜁니다")
+            push_stock(short, "해당 칸은 건너뜁니다")
 
         ok = True
         placed = {}
@@ -772,6 +799,7 @@ class BlockSort(Node):
             lst = stock.get(color) or []
             if not lst:
                 self.get_logger().warn(f"인간{hz_i}번의 {color} — 프리구역에 없어 건너뜀")
+                push_stock(color, f"인간{hz_i}번 → 로봇{dst}번 건너뜀")
                 ok = False
                 continue
             det = lst.pop(0)              # 같은 색이 여럿이면 하나씩 소비한다
@@ -817,6 +845,7 @@ class BlockSort(Node):
             pose = self.detect(color, near=xy)
         if pose is None:
             self.get_logger().error(f"{color} 를 다시 못 찾았습니다 — 건너뜁니다.")
+            push_stock(color, "순회를 다시 돌아도 못 찾았습니다")
             return False
         if not self.is_free(pose):
             # 관측 뒤에 판이 바뀌었거나 다른 개체를 잡은 것이다. 구역 위의 것은
@@ -1015,22 +1044,47 @@ class BlockSort(Node):
             f"파지 보정 ({g[0]:+.1f}, {g[1]:+.1f}) @ 손목 {self.last_rot:+.0f}°")
         pose[0] += g[0]
         pose[1] += g[1]
-        # 이송 높이까지 올린 뒤 xy 로 움직이고, 거기서 곧게 내린다.
-        # lift 높이(137mm)로 옮기면 손가락이 옆 블록을 스친다.
-        # 중간에 lift 높이를 따로 거치지 않는다 — 같은 수직선 위라 군더더기다.
+
+        # 접근과 이송을 나눈다.
+        #
+        # 접근은 **빈 손**이라 이송 높이(TRANSIT_Z=250)까지 올릴 이유가 없다.
+        # 검출을 마친 자리(관측 높이 ≈165)에서 그리퍼만 블록 위로 수평 이동한 뒤
+        # 곧게 내리면 된다. 그 xy 이동이 필요한 이유는 hover_over 가 **카메라**를
+        # 블록 위에 세우기 때문이다 — 그리퍼는 핸드아이 오프셋(+32.6,+60.1)만큼,
+        # 파지 보정까지 더해 66~77mm 떨어져 있다.
+        #
+        # 예전에는 이 xy 이동을 z=250 으로 올라가면서 함께 했는데, 그 상승이
+        # 씹히면(실측 2026-08-06: 복제 4회 중 2회) 팔이 그 자리에 머문 채 다음
+        # 명령이 나가 **xy 68mm 와 하강 178mm 를 동시에** 하게 됐다. 판 위를
+        # 대각선으로 훑어 옆 블록을 칠 수 있는 경로다.
+        # 접근에서 z 를 아예 안 건드리면 그 실패 경로 자체가 없어진다.
+        #
+        # 이송(블록을 물고 옮길 때)은 TRANSIT_Z 를 그대로 쓴다 — 물린 블록이
+        # 그리퍼 아래로 튀어나와 옆 블록을 치기 때문이고, 이건 빈 손과 사정이 다르다.
         up = list(pose); up[2] = max(TRANSIT_Z, pose[2] + self.lift)
         for attempt in range(1, GRASP_RETRY + 1):
-            movel(up)
-            movel(pose)
+            over = list(pose)
+            # 지금 높이를 유지한다. 다만 너무 낮은 자리에서 시작했을 수 있으므로
+            # 하한을 둔다 — 블록 윗면(판 위 35mm)을 확실히 넘겨야 한다.
+            try:
+                over[2] = max(get_current_posx()[0][2], APPROACH_Z)
+            except Exception:
+                over[2] = max(TRANSIT_Z, pose[2] + self.lift)
+            if not movel(over):
+                # 수평 접근이 안 되면 내려가지 않는다. 그대로 하강하면 블록 위가
+                # 아닌 곳으로 내려가 옆 블록을 친다.
+                self.get_logger().error("블록 위로 접근하지 못해 파지를 중단합니다")
+                return False
+            movel(pose)                      # 순수 z 하강
             gripper.close_gripper()
             wait_gripper()
             if grasped():
                 self.get_logger().info(f"파지 성공 (시도 {attempt})")
-                movel(up)
+                movel(up)                    # 물었으니 이송 높이로
                 return True
             self.get_logger().warn(f"빈손 — 시도 {attempt}/{GRASP_RETRY}")
             gripper.open_gripper(); wait_gripper()
-            movel(up)
+            movel(over)                      # 빈 손이므로 접근 높이면 충분하다
         return False
 
     def place_at(self, p, taught=False):
@@ -1369,6 +1423,35 @@ class BlockSort(Node):
         print(f"    GRASP_OFFSET = [{-m[0]:.1f}, {-m[1]:.1f}]\n")
         return m
 
+    def survey_zones(self):
+        """움직이기 전에 로봇구역 배치를 확인하고 대시보드에 반영한다.
+
+        복제(copy_human)는 전체 순회를 돌아 점유를 알지만, 색 지정/구역 지정
+        명령은 그냥 집으러 갔다. 그래서 화면의 구역 색이 지난 명령 시점에 머물러
+        실제 판과 어긋났다 — 사람이 손으로 블록을 치우거나 놓으면 특히 그렇다.
+
+        전체 순회(5곳)는 비싸므로 **로봇구역이 보이는 경유점만** 들른다.
+        어느 경유점이 어느 구역을 보는지는 핸드아이 오프셋(+32.6,+60.1) 때문에
+        팔 위치와 다르다 — 실측 시야중심으로 2번이 안쪽(로봇3·4),
+        3번이 바깥쪽(로봇1·2)을 본다.
+        """
+        pts = self.scan_points()
+        if not pts:
+            return {}
+        occ = {}
+        for i in ZONE_SURVEY_POINTS:
+            if i >= len(pts):
+                continue
+            self.goto(pts[i], f"[구역확인 {i + 1}/{len(pts)}]")
+            _, _, o = self.look(hz={})      # 인간구역 판정은 여기서 필요 없다
+            occ.update(o)
+        zones = sorted(self.cfg["zones"])
+        self.get_logger().info(
+            "로봇구역 현황 — " +
+            ", ".join(f"{z}번={occ.get(z) or '비어있음'}" for z in zones))
+        push_zones("robot", occ, zones)     # 안 보인 칸은 비었다고 반영된다
+        return occ
+
     def run_one(self, target, zone):
         """target 은 색 이름(str) 또는 집어올 구역 번호(int).
 
@@ -1387,6 +1470,9 @@ class BlockSort(Node):
                 self.get_logger().error(f"{target}번에서 집어 {zone}번에 놓으라는 건 "
                                         "제자리입니다.")
                 return False
+
+        # 움직이기 전에 로봇구역 현황을 확인한다. 화면과 실제 판을 맞추기 위해서다.
+        self.survey_zones()
 
         if isinstance(target, int):
             # 그 구역에 놓인 것을 집는 경우. 구역 위에 있으므로 순회로 찾지 않는다.
@@ -1414,6 +1500,7 @@ class BlockSort(Node):
         lst = stock.get(target) or []
         if not lst:
             self.get_logger().error(f"프리구역에서 {target} 을(를) 못 찾았습니다.")
+            push_stock(target, "명령을 수행할 수 없습니다")
             self.go_home()
             return False
         xy = (lst[0]["pose"][0], lst[0]["pose"][1])

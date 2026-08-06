@@ -46,6 +46,9 @@ COLOR_HSV_RANGES, _FILTERS, _FRAMES = _load_config(CONFIG_PATH)
 # 6색을 한 번의 촬영으로 덮으려면 촬영 0.4초 + 색당 처리 0.2초 × 6 = 1.6초 이상.
 # 팔이 움직이면 장면이 바뀌지만, 이동에는 대기까지 2초 넘게 걸려 그 사이 만료된다.
 FRAME_CACHE_SEC = float(os.environ.get('FRAME_CACHE_SEC', 0.4))
+# 자세가 그대로여도 이만큼 지나면 다시 찍는다. 팔이 멈춰 있는 동안 사람이
+# 손으로 블록을 옮길 수 있으므로 무한정 돌려쓰면 안 된다.
+FRAME_CACHE_MAX_SEC = float(os.environ.get('FRAME_CACHE_MAX_SEC', 3.0))
 
 MIN_AREA = _FILTERS['min_area']
 MAX_AREA_RATIO = _FILTERS['max_area_ratio']
@@ -177,9 +180,9 @@ def detect_color_box(hsv, ranges, max_area, depth=None):
 class ColorModel:
     def __init__(self):
         self.last_angle = 0.0      # 마지막 검출의 회전각 (도, 0~90)
-        self._cache = None         # (시각, 프레임들, 깊이) — _frames() 참고
+        self._cache = None         # (시각, 프레임들, 깊이, 자세키) — _frames() 참고
 
-    def get_all_detections(self, img_node, target):
+    def get_all_detections(self, img_node, target, pose_key=None):
         """그 색으로 보이는 블록을 전부 [(박스, 각도, 신뢰도), ...] 로 돌려준다.
 
         신뢰도가 높은 순이라 첫 번째만 쓰면 get_best_detection() 과 같다.
@@ -194,7 +197,7 @@ class ColorModel:
 
         # 한 장만 보면 그 순간의 그림자나 반사광에 그대로 속는다.
         # 짧게 여러 장을 모아서 매번 같은 자리에 나오는 것만 인정한다.
-        frames, depth = self._frames(img_node)
+        frames, depth = self._frames(img_node, pose_key)
         if not frames:
             print("No frames captured from the camera.")
             return []
@@ -213,28 +216,45 @@ class ColorModel:
         self.last_angle = out[0][1]
         return out
 
-    def _frames(self, img_node):
-        """촬영을 색마다 새로 하지 않고 짧은 동안 돌려 쓴다.
+    def _frames(self, img_node, pose_key=None):
+        """촬영을 색마다 새로 하지 않고 돌려 쓴다.
 
         부르는 쪽은 한 자리에 서서 아는 색을 전부 물어본다(현재 6색). 색마다
         FRAME_DURATION(0.4초)씩 새로 모으면 그것만 2.4초다. 실측 2026-08-04:
         경유점 한 곳에서 6색을 재는 데 11초가 걸렸다.
         같은 순간의 같은 화면을 보는 것이므로 돌려 써도 결과가 달라지지 않는다.
 
-        팔이 움직이면 화면이 바뀌므로 유효기간을 짧게 둔다. 검출은 팔이 멎은
-        뒤에만 하므로(SETTLE_SEC) 이 창 안에서는 장면이 고정돼 있다.
+        **무효화는 시간이 아니라 팔 자세로 한다.** 낡은 프레임이 위험한 이유는
+        시간이 지나서가 아니라, 이동 전에 찍은 영상을 이동 후 자세로 변환하면
+        좌표가 통째로 어긋나기 때문이다(실측: 윗면 z 가 +36mm 튀고 250mm 떨어진
+        블록이 잡혔다). 그래서 팔이 그대로인지를 직접 보는 것이 정확하다.
+
+        예전에는 FRAME_CACHE_SEC(0.4초) 으로 막았는데, 6색을 덮으려면 1.6초는
+        필요해서 캐시가 매번 만료됐다 — 안전은 얻고 속도는 잃은 구조였다.
+        자세로 막으면 한 자리에서는 촬영 1회를 공유하고, 팔이 움직이는 순간
+        바로 버린다. 경유점 한 곳이 약 6초 → 4초로 줄어든다.
+
+        pose_key 를 못 받으면(자세를 모르면) 예전처럼 시간으로 막는다 —
+        모르는 채로 재사용하는 것보다 안전하다.
         """
         now = time.time()
-        if self._cache and now - self._cache[0] < FRAME_CACHE_SEC:
-            return self._cache[1], self._cache[2]
+        if self._cache:
+            t0, frames, depth, key0 = self._cache
+            if pose_key is not None and key0 is not None:
+                # 팔이 그대로면 장면도 그대로다. 다만 조명·물체가 바뀔 수 있으니
+                # 상한은 둔다 (사람이 손으로 블록을 옮기는 경우).
+                if key0 == pose_key and now - t0 < FRAME_CACHE_MAX_SEC:
+                    return frames, depth
+            elif now - t0 < FRAME_CACHE_SEC:
+                return frames, depth
         frames = collect_frames(img_node, FRAME_DURATION)
         depth = img_node.get_depth_frame()
-        self._cache = (now, frames, depth)
+        self._cache = (now, frames, depth, pose_key)
         return frames, depth
 
-    def get_best_detection(self, img_node, target):
+    def get_best_detection(self, img_node, target, pose_key=None):
         """가장 믿을 만한 것 하나. 예전 호출부를 그대로 두기 위해 남긴다."""
-        out = self.get_all_detections(img_node, target)
+        out = self.get_all_detections(img_node, target, pose_key)
         if not out:
             return None, None
         box, ang, hit = out[0]
