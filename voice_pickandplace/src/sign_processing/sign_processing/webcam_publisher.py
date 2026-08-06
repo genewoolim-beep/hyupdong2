@@ -227,7 +227,10 @@ def main():
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # rclpy.spin()이 SIGINT를 받으면 자체적으로 이미 shutdown을 호출해 둔다.
+        # 여기서 다시 부르면 "rcl_shutdown already called"로 죽으므로 확인 후 부른다.
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

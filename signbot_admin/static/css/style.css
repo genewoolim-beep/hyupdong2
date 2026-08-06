@@ -112,6 +112,16 @@ body {
 .camera-panel { flex: 1.7; min-width: 380px; }
 .robot-panel { flex: 1; min-width: 320px; }
 
+/* ---------- 제어 화면: 큰 로봇 시점 + 작은 조종 화면/상태를 세로로 쌓은 옆 칸 ---------- */
+.control-side-col {
+  flex: 1.3;
+  min-width: 480px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.gesture-cam-panel .video-feed { max-width: 640px; width: 100%; margin: 0 auto; }
+
 /* ---------- Mode banner (제어 화면) ---------- */
 .mode-banner {
   align-items: center;

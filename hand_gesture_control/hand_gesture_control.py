@@ -533,9 +533,6 @@ def run_session():
         draw_key_legend(screen)
         draw_return_hold(screen, P.both_open_hold)
 
-        if USE_ADMIN:
-            set_latest_frame(screen)
-
         txt = (f"gesture={P.gesture}({P.gesture_score:.2f})  gain={P.gain:.2f}  "
                f"{'avg' if P.smooth else 'raw'}  z={P.z:.2f}  "
                f"gripper={'OPEN' if P.gripper > 0.5 else 'CLOSED'}")
@@ -545,6 +542,13 @@ def run_session():
                     (12, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (200, 200, 200), 1)
         cv2.putText(frame, f"{fps:.0f} fps", (w - 130, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (120, 255, 120), 2)
+
+        # 대시보드에는 screen(추상 표시) 대신 camera(실제 영상 + 조이스틱 원 + 손
+        # 스켈레톤 + z 게이지)를 보낸다 — 원격에서 손 위치가 안 보이면 조작하기
+        # 어렵다는 피드백을 반영했다.
+        if USE_ADMIN:
+            set_latest_frame(frame)
+
         cv2.imshow("camera", frame)
         cv2.imshow("screen", screen)
 

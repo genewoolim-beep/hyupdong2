@@ -83,6 +83,19 @@ signbot_admin/
    아직 어디서도 이 엔드포인트를 호출하지 않으므로 지금은 빈 상태입니다 — 향후 로봇 제어 연동 시
    예외 처리부에서 이 엔드포인트를 호출하도록 붙이세요.
 
+8. **작업모드 ↔ 제어모드**: `GET/POST /api/mode` 로 지금 활성 인터페이스(`work`/`control`)를
+   보고합니다. `sign_demo.py --admin` 은 "모드변경" 글로스가 확정되면 `control` 을,
+   `hand_gesture_control.py --admin` 은 양손 3초 유지로 `work` 를 보냅니다. 모드가 실제로 바뀌면
+   브라우저가 작업 화면(`/`) ↔ 제어 화면(`/control`)으로 자동 이동합니다.
+   `POST /api/frame/control` 은 `hand_gesture_control.py` 의 `camera` 창(조이스틱 원 + 손
+   스켈레톤 + z 게이지가 그려진 화면)을 받아 `/control_video_feed` 로 중계합니다 — 제어 화면의
+   작은 보조 패널용입니다.
+
+9. **로봇 시점(RealSense) 중계**: `hand_gesture_control/realsense_bridge.py` 가 로봇의 RealSense
+   컬러 토픽을 구독해 `POST /api/frame/realsense` 로 올리면 `/realsense_video_feed` 로 중계합니다.
+   제어 화면의 **큰 주 패널**입니다 — 손동작으로 로봇을 조종하려면 조종자 웹캠(위 8번)이 아니라
+   로봇이 실제로 보는 화면을 봐야 하기 때문입니다.
+
 ## Docker 공유 시 참고
 
 YOLO 모델(`Fruits/train_20260731_103755/weights/best.pt` 등)이나 카메라/GPU 장치를 이 관리자 UI와

@@ -333,14 +333,34 @@ latest_control_frame = {"jpg": None}
 @app.route("/api/frame/control", methods=["POST"])
 def api_frame_control():
     """
-    hand_gesture_control.py --admin 이 매 프레임(screen 창, JPEG 바이트)을
-    이 엔드포인트로 POST하면 /control_video_feed 가 그 화면을 그대로 중계합니다.
+    hand_gesture_control.py --admin 이 매 프레임(camera 창 — 실카메라+조이스틱
+    원+손 스켈레톤+z 게이지, JPEG 바이트)을 이 엔드포인트로 POST하면
+    /control_video_feed 가 그 화면을 그대로 중계합니다.
     /api/frame(작업모드 카메라)과 별도 버퍼다 — 같은 걸 쓰면 두 화면이 서로 덮어쓴다.
     """
     data = request.get_data()
     if data:
         with control_frame_lock:
             latest_control_frame["jpg"] = data
+    return "", 204
+
+
+realsense_frame_lock = threading.Lock()
+latest_realsense_frame = {"jpg": None}
+
+
+@app.route("/api/frame/realsense", methods=["POST"])
+def api_frame_realsense():
+    """
+    로봇의 RealSense 컬러 영상을 중계하는 브리지(realsense_bridge.py 등)가 매
+    프레임(JPEG 바이트)을 이 엔드포인트로 POST하면 /realsense_video_feed 가
+    그대로 중계합니다. 제어 화면에서 "로봇이 실제로 보는 시점"을 보여주는 용도라,
+    조이스틱 조작용 카메라(/api/frame/control)와는 완전히 다른 화면·별도 버퍼다.
+    """
+    data = request.get_data()
+    if data:
+        with realsense_frame_lock:
+            latest_realsense_frame["jpg"] = data
     return "", 204
 
 
@@ -455,10 +475,33 @@ def gen_control_video_frames():
 def control_video_feed():
     """
     hand_gesture_control.py --admin 이 POST /api/frame/control 로 밀어넣는 최신
-    screen 화면을 MJPEG로 중계합니다. 제어 화면 페이지의 조종자 시점 패널용.
+    camera 화면(실카메라+조이스틱 원+손 스켈레톤+z 게이지)을 MJPEG로 중계합니다.
+    제어 화면 페이지의 "조종 화면" 패널(작게 표시)용.
     """
     return Response(
         gen_control_video_frames(), mimetype="multipart/x-mixed-replace; boundary=frame"
+    )
+
+
+def gen_realsense_video_frames():
+    boundary = b"--frame\r\n"
+    while True:
+        with realsense_frame_lock:
+            frame = latest_realsense_frame["jpg"]
+        if frame:
+            yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+        time.sleep(0.05)
+
+
+@app.route("/realsense_video_feed")
+def realsense_video_feed():
+    """
+    로봇의 RealSense 중계 브리지가 POST /api/frame/realsense 로 밀어넣는 최신
+    화면을 MJPEG로 중계합니다. 제어 화면 페이지의 "로봇 시점" 패널(크게 표시)용 —
+    실제로 로봇을 조종하려면 로봇이 보는 화면을 봐야 하므로 여기가 주 화면이다.
+    """
+    return Response(
+        gen_realsense_video_frames(), mimetype="multipart/x-mixed-replace; boundary=frame"
     )
 
 
