@@ -8,6 +8,8 @@
 (function () {
   const POLL_INTERVAL_MS = 5000;
   const SENTENCE_POLL_INTERVAL_MS = 300; // 진행중 단어(live_word)까지 보여주려면 훨씬 자주 폴링해야 함
+  const MODE_POLL_INTERVAL_MS = 1000;    // 작업모드/제어모드 전환을 빠르게 체감하도록
+  const MODE_LABEL = { work: "작업모드", control: "제어모드" };
 
   function fmtNumber(n) {
     return Number(n).toLocaleString("ko-KR");
@@ -56,6 +58,53 @@
     if (statMode) statMode.textContent = robot.mode;
     const statLastCmd = document.getElementById("statLastCmd");
     if (statLastCmd) statLastCmd.textContent = robot.last_command;
+  }
+
+  let lastKnownMode = null; // 실제로 "바뀐 순간"에만 자동 이동하기 위한 기준값
+
+  function renderMode(data) {
+    const label = MODE_LABEL[data.mode] || data.mode;
+
+    const pill = document.getElementById("modePill");
+    if (pill) pill.className = "mode-pill mode-" + data.mode;
+    const text = document.getElementById("modeText");
+    if (text) text.textContent = label;
+
+    const banner = document.getElementById("modeBanner");
+    if (banner) banner.className = "panel mode-banner mode-banner-" + data.mode;
+    const bannerValue = document.getElementById("modeBannerValue");
+    if (bannerValue) bannerValue.textContent = label;
+    const hint = document.getElementById("modeBannerHint");
+    if (hint) {
+      hint.textContent =
+        data.mode === "control"
+          ? "사람이 손동작(hand_gesture_control.py)으로 로봇을 직접 조종 중입니다."
+          : '로봇은 수어 명령을 기다리는 중입니다. "박수 - 모드변경 - 박수"로 제어권을 넘길 수 있습니다.';
+    }
+    const updatedAt = document.getElementById("modeUpdatedAt");
+    if (updatedAt) updatedAt.textContent = data.updated_at;
+
+    // 모드가 실제로 전환된 순간에만, 그 모드에 맞는 화면으로 자동 이동한다.
+    // (매 폴링마다 같은 값이 와도 리다이렉트하면 안 되므로 이전 값과 비교한다.)
+    if (lastKnownMode !== null && lastKnownMode !== data.mode) {
+      const path = window.location.pathname;
+      if (data.mode === "control" && path === "/") {
+        window.location.href = "/control";
+      } else if (data.mode === "work" && path === "/control") {
+        window.location.href = "/";
+      }
+    }
+    lastKnownMode = data.mode;
+  }
+
+  async function fetchMode() {
+    try {
+      const res = await fetch("/api/mode");
+      if (!res.ok) return;
+      renderMode(await res.json());
+    } catch (e) {
+      console.error("mode polling failed", e);
+    }
   }
 
   async function fetchLogs() {
@@ -225,11 +274,13 @@
     fetchZones();
     fetchSentence();
     fetchDebugLog();
+    fetchMode();
     setInterval(fetchStatus, POLL_INTERVAL_MS);
     setInterval(fetchLogs, POLL_INTERVAL_MS);
     setInterval(fetchZones, POLL_INTERVAL_MS);
     setInterval(fetchSentence, SENTENCE_POLL_INTERVAL_MS);
     setInterval(fetchDebugLog, POLL_INTERVAL_MS);
+    setInterval(fetchMode, MODE_POLL_INTERVAL_MS);
   }
 
   document.addEventListener("DOMContentLoaded", bindControlButtons);

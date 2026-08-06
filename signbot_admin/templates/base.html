@@ -10,12 +10,21 @@
   <div class="navbar">
     <div class="brand">SignBot Control</div>
     <div class="nav-right">
+      <div class="mode-pill mode-{{ mode.mode }}" id="modePill">
+        <span class="dot"></span>
+        <span id="modeText">{{ mode_label.get(mode.mode, mode.mode) }}</span>
+      </div>
       <div class="status-pill{{ '' if robot.connected else ' offline' }}" id="robotStatusPill">
         <span class="dot"></span>
         <span id="robotStatusText">{{ '로봇 연결됨' if robot.connected else '로봇 연결 끊김' }}</span>
       </div>
       <div class="user-tag">관리자 유용준</div>
     </div>
+  </div>
+
+  <div class="page-tabs">
+    <a class="page-tab {{ 'active' if active == 'work' }}" href="{{ url_for('dashboard') }}">작업 화면</a>
+    <a class="page-tab {{ 'active' if active == 'control' }}" href="{{ url_for('control') }}">제어 화면</a>
   </div>
 
   <div class="main-area">

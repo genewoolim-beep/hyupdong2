@@ -85,6 +85,13 @@ current_sentence = {
 # POST /api/debug 로 기록하세요. level: info / warn / error
 debug_logs = []
 
+# 지금 어느 인터페이스가 활성인지. work(작업모드 — 수어로 로봇에 명령) /
+# control(제어모드 — 사람이 손동작으로 로봇을 직접 조종).
+# sign_demo.py --admin 이 "모드변경" 글로스를 확정하면 control 로,
+# hand_gesture_control.py --admin 이 양손 3초 유지를 감지하면 work 로 보고한다.
+MODE_LABEL = {"work": "작업모드", "control": "제어모드"}
+system_mode = {"mode": "work", "updated_at": "-"}
+
 
 def get_zone_list(state):
     return [
@@ -119,6 +126,7 @@ def get_stats():
 def dashboard():
     return render_template(
         "dashboard.html",
+        active="work",
         stats=get_stats(),
         robot=robot_state,
         latest=recognition_logs[0] if recognition_logs else None,
@@ -127,6 +135,19 @@ def dashboard():
         human_zones=get_zone_list(human_zone_state),
         sentence=current_sentence,
         debug_logs=debug_logs[:20],
+        mode=system_mode,
+        mode_label=MODE_LABEL,
+    )
+
+
+@app.route("/control")
+def control():
+    return render_template(
+        "control.html",
+        active="control",
+        robot=robot_state,
+        mode=system_mode,
+        mode_label=MODE_LABEL,
     )
 
 
@@ -272,6 +293,24 @@ def api_frame():
     return "", 204
 
 
+control_frame_lock = threading.Lock()
+latest_control_frame = {"jpg": None}
+
+
+@app.route("/api/frame/control", methods=["POST"])
+def api_frame_control():
+    """
+    hand_gesture_control.py --admin 이 매 프레임(screen 창, JPEG 바이트)을
+    이 엔드포인트로 POST하면 /control_video_feed 가 그 화면을 그대로 중계합니다.
+    /api/frame(작업모드 카메라)과 별도 버퍼다 — 같은 걸 쓰면 두 화면이 서로 덮어쓴다.
+    """
+    data = request.get_data()
+    if data:
+        with control_frame_lock:
+            latest_control_frame["jpg"] = data
+    return "", 204
+
+
 @app.route("/api/debug")
 def api_debug():
     """로봇 상태 · 제어 패널 하단 디버그 로그 폴링용"""
@@ -295,6 +334,28 @@ def api_debug_add():
     debug_logs.insert(0, entry)
     del debug_logs[20:]
     return jsonify(entry), 201
+
+
+@app.route("/api/mode")
+def api_mode():
+    """상단 배지 · 제어 화면 폴링용. 지금 활성 인터페이스(work/control)를 반환한다."""
+    return jsonify(system_mode)
+
+
+@app.route("/api/mode", methods=["POST"])
+def api_mode_update():
+    """
+    sign_demo.py --admin("모드변경" 확정 시 control) / hand_gesture_control.py --admin
+    (양손 3초 유지 시 work) 이 모드가 바뀔 때마다 이 엔드포인트로 보고한다.
+    예: requests.post(".../api/mode", json={"mode": "control"})
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    mode = data.get("mode")
+    if mode not in MODE_LABEL:
+        return jsonify({"error": f"unknown mode: {mode}"}), 400
+    system_mode["mode"] = mode
+    system_mode["updated_at"] = datetime.now().strftime("%H:%M:%S")
+    return jsonify(system_mode)
 
 
 @app.route("/api/robot/status", methods=["POST"])
@@ -344,6 +405,27 @@ def video_feed():
     """
     return Response(
         gen_video_frames(), mimetype="multipart/x-mixed-replace; boundary=frame"
+    )
+
+
+def gen_control_video_frames():
+    boundary = b"--frame\r\n"
+    while True:
+        with control_frame_lock:
+            frame = latest_control_frame["jpg"]
+        if frame:
+            yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+        time.sleep(0.05)
+
+
+@app.route("/control_video_feed")
+def control_video_feed():
+    """
+    hand_gesture_control.py --admin 이 POST /api/frame/control 로 밀어넣는 최신
+    screen 화면을 MJPEG로 중계합니다. 제어 화면 페이지의 조종자 시점 패널용.
+    """
+    return Response(
+        gen_control_video_frames(), mimetype="multipart/x-mixed-replace; boundary=frame"
     )
 
 

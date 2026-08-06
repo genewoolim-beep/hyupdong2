@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}제어 화면 · SignBot Control{% endblock %}
+{% block content %}
+<h1 class="page-title">제어 화면</h1>
+
+<div class="panel mode-banner mode-banner-{{ mode.mode }}" id="modeBanner">
+  <div class="mode-banner-label">현재 모드</div>
+  <div class="mode-banner-value" id="modeBannerValue">{{ mode_label.get(mode.mode, mode.mode) }}</div>
+  <div class="mode-banner-hint" id="modeBannerHint">
+    {% if mode.mode == 'control' %}사람이 손동작(hand_gesture_control.py)으로 로봇을 직접 조종 중입니다.
+    {% else %}로봇은 수어 명령을 기다리는 중입니다. "박수 - 모드변경 - 박수"로 제어권을 넘길 수 있습니다.
+    {% endif %}
+  </div>
+  <div class="mode-banner-updated">마지막 전환: <span id="modeUpdatedAt">{{ mode.updated_at }}</span></div>
+</div>
+
+<div class="mid-row">
+  <div class="panel camera-panel">
+    <div class="panel-title">조종 화면 (xy · z · 그리퍼)</div>
+    <div class="video-feed">
+      <img id="controlVideoFeed" src="{{ url_for('control_video_feed') }}" alt="hand_gesture_control.py 화면" onerror="this.style.display='none'; document.getElementById('controlVideoPlaceholder').style.display='block';">
+      <span id="controlVideoPlaceholder" class="video-placeholder-text">hand_gesture_control.py --admin 이 아직 화면을 보내지 않았습니다</span>
+    </div>
+    <p class="hint-text">xy 좌표(점 위치) · z 높이(게이지) · 그리퍼 상태가 화면 안에 그려져 있습니다 — hand_gesture_control.py의 screen 창을 그대로 중계합니다.</p>
+  </div>
+
+  <div class="panel robot-panel">
+    <div class="panel-title">로봇 상태</div>
+    <div class="status-row"><span>연결 상태</span><span id="statConn">{{ '정상 · ' + robot.model if robot.connected else '연결 끊김' }}</span></div>
+    <div class="status-row"><span>현재 모드</span><span id="statMode">{{ robot.mode }}</span></div>
+    <div class="status-row"><span>마지막 명령</span><span id="statLastCmd">{{ robot.last_command }}</span></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    if (window.SignBotDashboard) window.SignBotDashboard.startPolling();
+  });
+</script>
+{% endblock %}
