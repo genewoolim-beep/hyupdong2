@@ -28,7 +28,14 @@ hand_gesture_control.py 는 손을 읽어 화면에만 그렸다. 이 모듈이 
   중앙(데드존)  →  정지
   위/아래       →  ±x 로 TELEOP_SPEED
   좌/우         →  ±y 로 TELEOP_SPEED (거울)
-  z 게이지      →  가리키는 높이로 일정 속도, 도달하면 정지
+  z 게이지      →  3등분(위/가운데/아래). 가운데면 정지, 위/아래면 그 방향 TELEOP_SPEED
+
+z 게이지도 xy와 똑같은 십자선 방식이다. 처음엔 "게이지가 가리키는 높이로
+절대 이동"이었는데, 그러면 제어모드에 들어가는 순간 로봇 z와 손이 가리키는
+높이가 세션마다 달라 갑자기 그 차이만큼 움직였다 — 손·로봇 둘 다 매번
+다른 위치에서 시작하니 진입 시점마다 영점을 맞춰야 하는 문제였다. xy처럼
+중간 기준 방향만 보게 하면 로봇은 항상 지금 있는 자리에서 움직이기
+시작하므로 영점 조절 자체가 필요 없어진다.
 
 ## 경계
 
@@ -61,9 +68,18 @@ TELEOP_ACC = float(os.environ.get("TELEOP_ACC", 100.0))      # mm/s^2 (지령 �
 # 십자선 중앙의 정지 구역. 화면 비율(0~1)에서 중앙으로부터 이 반경 안이면 정지.
 DEADZONE = float(os.environ.get("TELEOP_DEADZONE", 0.08))
 
-# z 게이지가 가리키는 높이와 이만큼 안이면 z 정지. 게이지는 높이를 뜻하므로
-# 도달하면 멈춰야 한다 — 방향만 보고 일정 속도로 가되, 다 오면 선다.
-Z_TOL = float(os.environ.get("TELEOP_Z_TOL", 3.0))           # mm
+# z 게이지도 xy와 같은 십자선 방식이다 — 게이지 중간(0.5)이 정지, 위/아래로
+# 벗어나면 그 방향으로 일정 속도. "가리키는 높이로 이동" 방식(절대 목표)은
+# 손·로봇의 시작 위치가 세션마다 달라 제어모드에 들어가자마자 손이 가리키는
+# 절대 높이를 향해 갑자기 움직이는 문제가 있었다 — 영점 조절이 따로 필요
+# 없도록 xy와 통일했다.
+#
+# 게이지를 위/가운데(정지)/아래 3등분한다 — 가운데 정지구역이 전체의 1/3
+# (한쪽으로 1/6)이라 xy의 데드존(0.08)보다 훨씬 넓다. 높이를 그대로
+# 유지하려는 의도인데 손이 살짝만 떨려도 데드존을 벗어나 버리면 높이를
+# 고정할 수 없으므로, 가만히 있어도 안정적으로 정지 상태를 유지할 수 있게
+# 넉넉히 잡았다.
+Z_DEADZONE = float(os.environ.get("TELEOP_Z_DEADZONE", 1 / 6))
 
 # 경계에 이만큼 다가가면 그 축 속도를 0 으로 만든다. 정지에도 거리가 필요하다.
 BRAKE = float(os.environ.get("TELEOP_BRAKE", 15.0))          # mm
@@ -226,7 +242,7 @@ class RobotTeleop:
             self.enabled = True
             print(f"  로봇 조종 연결됨 — 시작 위치 "
                   f"[{cur[0]:.0f}, {cur[1]:.0f}, {cur[2]:.0f}]  "
-                  f"속도 {TELEOP_VEL:.0f}mm/s  한틱 최대 {STEP_MAX:.1f}mm")
+                  f"속도 {TELEOP_SPEED:.0f}mm/s")
             print(f"  작업영역(교시)  x {X_MIN:.0f}~{X_MAX:.0f}  "
                   f"y {Y_MIN:.0f}~{Y_MAX:.0f}  z {Z_MIN:.0f}~{Z_MAX:.0f}")
             print(f"  목표 한계(-{SAFETY_MARGIN:.0f}mm)  x {TX_MIN:.0f}~{TX_MAX:.0f}  "
@@ -242,7 +258,7 @@ class RobotTeleop:
         """조종 값을 **속도**로 바꿔 로봇에 보낸다.
 
         pos_xy       화면 비율 (0~1, 0~1). 십자선 중앙은 (0.5, 0.5)
-        z_norm       0~1. 게이지가 가리키는 높이
+        z_norm       0~1. 게이지 중앙은 0.5 — xy와 같은 십자선 방식(절대 높이 아님)
         gripper_open True 면 열기
         hand_seen    이번 프레임에 손이 보였는가 (데드맨)
 
@@ -281,13 +297,10 @@ class RobotTeleop:
         vx = -TELEOP_SPEED if v > DEADZONE else (TELEOP_SPEED if v < -DEADZONE else 0.0)
         vy = -TELEOP_SPEED if u > DEADZONE else (TELEOP_SPEED if u < -DEADZONE else 0.0)
 
-        # ── z: 게이지가 가리키는 높이로 일정 속도. 도달하면 정지 ──
-        vz = 0.0
-        if cur is not None:
-            z_want = TZ_MIN + _clamp(float(z_norm), 0.0, 1.0) * (TZ_MAX - TZ_MIN)
-            gap = z_want - cur[2]
-            if abs(gap) > Z_TOL:
-                vz = TELEOP_SPEED if gap > 0 else -TELEOP_SPEED
+        # ── z: xy와 같은 십자선 방식. 게이지 중간(0.5)이 정지, 위/아래로
+        # 벗어나면 그 방향 일정 속도. 얼마나 벗어났는지는 속도를 안 바꾼다.
+        w = float(z_norm) - 0.5
+        vz = TELEOP_SPEED if w > Z_DEADZONE else (-TELEOP_SPEED if w < -Z_DEADZONE else 0.0)
 
         # ── 경계: 밖으로 나가는 방향의 속도만 0 으로 ──
         # 정지에도 거리가 필요하므로 경계 BRAKE 안에 들어오면 미리 끊는다.
@@ -349,6 +362,10 @@ class RobotTeleop:
             self._grip_open = want_open
         except Exception as e:
             print(f"  그리퍼 명령 실패({e})")
+
+    def cur_pos(self):
+        """지금 로봇의 실제 [x, y, z, ...](mm). 아직 못 읽었으면 None."""
+        return self._pos_cache
 
     def status(self):
         """화면에 겹쳐 보여줄 한 줄."""
