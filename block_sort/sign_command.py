@@ -45,7 +45,7 @@ GLOSS_TO_COLOR = {
     "파랑": "파란색",
     "보라": "보라색",
 }
-GLOSS_TO_ZONE = {f"{i}번구역": i for i in range(1, 7)}
+GLOSS_TO_ZONE = {f"{i}번구역": i for i in range(1, 5)}   # 물리적 제약으로 1~4번구역만 운용
 
 # 이 글로스가 나오면 한 문장이 끝난 것으로 본다. 수어는 동사가 문장 끝에 온다.
 SENTENCE_END = {"놓다", "가져오다", "들다", "조립하다"}
