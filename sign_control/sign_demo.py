@@ -658,6 +658,25 @@ def push_log(sign, confidence, command, result):
     threading.Thread(target=_send, daemon=True).start()
 
 
+def push_mode(mode):
+    """signbot_admin의 /api/mode 로 인터페이스 모드(work/control)를 보고한다.
+
+    "모드변경"이 확정되면 control 을 보낸다 — 실제로 손동작 제어(control)로
+    넘어가는 것은 hand_gesture_control.py 를 사람이 직접 켜야 하고, 그 스크립트가
+    양손 3초 유지를 감지하면 work 를 되돌려 보낸다.
+    """
+    def _send():
+        try:
+            body = json.dumps({"mode": mode}).encode("utf-8")
+            req = urllib.request.Request(
+                f"{ADMIN_URL}/api/mode", data=body,
+                headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=1.0)
+        except Exception:
+            pass
+    threading.Thread(target=_send, daemon=True).start()
+
+
 _frame_lock = threading.Lock()
 _frame_holder = {"jpg": None}
 
@@ -736,6 +755,7 @@ def mode_run(use_llm=False, use_admin=False):
     if use_admin:
         print(f"  → signbot_admin 전송: {ADMIN_URL}/api/sentence, /api/frame")
         start_frame_sender()
+        push_mode("work")   # 이 스크립트가 떴다는 것 자체가 작업모드가 활성이라는 뜻
     print()
 
     ui = {}
@@ -831,6 +851,9 @@ def mode_run(use_llm=False, use_admin=False):
                                             final_text = sentence or " ".join(glosses)
                                             push_sentence("translate", text=final_text)
                                             push_log(cur, prob, final_text, "성공")
+                                            if "모드변경" in glosses:
+                                                print("  ⇄ 모드변경 — 제어모드로 전환 요청")
+                                                push_mode("control")
                                         else:
                                             push_sentence("clear")
                                             push_log(cur, prob, "문장 종료(빈 문장)", "성공")
