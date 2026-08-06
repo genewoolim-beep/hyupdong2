@@ -103,10 +103,21 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 launch() {   # launch <이름> <명령...>
+    #
+    # 파이프(`| sed`)로 접두어를 붙이면 $! 가 파이프라인의 **마지막**(sed) PID 를
+    # 잡는다. 그러면 실제 프로세스가 죽어도 알 수 없고, 정리할 때도 sed 만
+    # 죽여 노드가 살아남는다 — 다음 실행이 V4L2 장치를 못 열어 무너진다.
+    # 프로세스 치환을 쓰면 $! 가 명령 자신의 PID 다.
     local name="$1"; shift
     echo "▶ $name"
-    "$@" 2>&1 | sed "s/^/[$name] /" &
-    PIDS+=($!)
+    "$@" > >(sed "s/^/[$name] /") 2>&1 &
+    local pid=$!
+    sleep 0.5
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo "  ! $name 이 곧바로 종료됐습니다"
+        return 1
+    fi
+    PIDS+=("$pid")
     NAMES+=("$name")
 }
 
@@ -133,12 +144,12 @@ wait_http() {    # wait_http <url> [초]
 # 장치를 독점하므로, 남아 있으면 새 것이 "프레임을 못 받았습니다" 로 종료되고
 # 그 뒤 sign/gesture 가 토픽을 못 받아 줄줄이 무너진다.
 # 실측 2026-08-06: 이것 때문에 제어모드가 켜지자마자 작업모드로 튕겼다.
-STALE=$(pgrep -f "lib/sign_processing/webcam_publisher|lib/object_detection/object_detection|realsense2_camera_node|realsense_bridge.py|hand_gesture_control.py|block_sort.py sign" 2>/dev/null | tr '\n' ' ')
+STALE=$(pgrep -f "lib/sign_processing/webcam_publisher|lib/object_detection/object_detection|realsense2_camera_node|realsense_bridge.py|hand_gesture_control.py|block_sort.py sign|signbot_admin/app.py" 2>/dev/null | tr '\n' ' ')
 if [[ -n "${STALE// /}" ]]; then
     echo "  ! 이전 실행이 남아 있습니다: $STALE"
     echo "    정리하고 다시 실행하세요:"
     echo "      pkill -INT -f 'block_sort.py sign'; sleep 3"
-    echo "      pkill -TERM -f 'webcam_publisher|object_detection|realsense|hand_gesture'"
+    echo "      pkill -TERM -f 'webcam_publisher|object_detection|realsense|hand_gesture|signbot_admin/app.py'"
     exit 1
 fi
 
@@ -170,7 +181,11 @@ if want webcam; then
 fi
 
 if want admin; then
-    launch admin env PYTHONUNBUFFERED=1 python3 -u "$ADMIN_DIR/app.py"
+    if ! launch admin env PYTHONUNBUFFERED=1 python3 -u "$ADMIN_DIR/app.py"; then
+        echo "  ! 대시보드를 못 띄웠습니다 — :5000 을 다른 프로세스가 쓰고 있는지"
+        echo "    확인하세요:  pkill -f 'signbot_admin/app.py'"
+        exit 1
+    fi
     wait_http "$ADMIN_URL/" 20
 fi
 

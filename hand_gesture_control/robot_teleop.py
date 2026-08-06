@@ -2,32 +2,41 @@
 """손동작 조종 값을 실제 로봇 움직임으로 옮긴다.
 
 hand_gesture_control.py 는 손을 읽어 화면에만 그렸다. 이 모듈이 그 값을
-로봇 좌표로 바꿔 팔에 흘려보낸다. 파일을 나눈 이유는 두 가지다 —
-조종 인식(그쪽)과 로봇 제어(이쪽)는 고쳐야 할 이유가 서로 다르고,
-`--robot` 없이는 아예 import 되지 않아 **기본이 안전(화면만)** 이 된다.
+로봇 **속도**로 바꿔 팔에 흘려보낸다. `--robot` 없이는 import 되지 않아
+기본이 안전(화면만)이다.
 
-## 왜 servol 인가
+## 왜 speedl 인가 — 위치가 아니라 속도를 준다
 
-movel 은 '한 번의 이동' 명령이다. 서비스가 명령을 접수하면 바로 반환하고
-실제 이동은 그 뒤에 진행되므로, 매 프레임 새 목표를 밀어넣으면 앞 모션이
-안 끝나 거부된다("A motion is ongoing so new commands are not accepted." —
-실측 2026-08-06 한 실행에 23회). servol 은 목표를 주기적으로 갱신하는
-용도로 만들어진 명령이라 이 문제가 없다.
+`movel` 은 "이 점으로 가라". 매 프레임 밀어넣으면 앞 모션이 안 끝나 거부된다
+("A motion is ongoing", 실측 한 실행에 23회). 스트리밍에 못 쓴다.
 
-## 천천히 움직이게 하는 두 겹
+`servol` 은 스트리밍은 되지만 여전히 **위치**를 준다. 목표가 로봇보다 앞서
+달아나면 컨트롤러가 그 거리를 메우려고 **가속한다** — 지정 속도를 넘겨
+판에 부딪힌 원인이 이것이었다(실측 2026-08-06, 두 번). 목표점 이동량을
+제한하고(STEP_MAX) 목표를 실제 위치에 묶어도(LEASH) 근본은 남았다.
+제한이 전부 '목표점'에 걸릴 뿐, 로봇이 그 목표까지 얼마나 빨리 가는지는
+컨트롤러가 정하기 때문이다.
 
-속도 상한(TELEOP_VEL)만으로는 부족하다. 그건 "빨리 가지 마라"일 뿐,
-손이 튀거나 인식이 한 프레임 흔들리면 **먼 목표**가 그대로 들어간다.
-그래서 한 주기에 움직일 수 있는 거리(STEP_MAX)를 따로 막는다 —
-이쪽이 실질적인 안전장치다.
+`speedl` 은 **속도를 직접 지령한다.** 목표점 개념이 없으므로 따라잡기 가속이
+원리적으로 생기지 않는다. 손이 중앙이면 0, 벗어나면 일정 속도 — 그뿐이다.
 
-## 작업영역
+## 십자선 방식
 
-목표는 항상 상자 안으로 clamp 된다. 실측 2026-08-06 에 판 밖 오검출로
-로봇이 (116, 413) 으로 간 적이 있는데, 조종 모드에서는 사람이 그렇게
-보낼 수도 있다. Z_MIN 은 판보다 위에 둔다 — 판을 뚫는 명령은 아예 못 만든다.
+방향만 본다. **얼마나 벗어났는지는 속도를 안 바꾼다.**
+속도가 변하지 않아야 예측 가능하고, 그게 이 방식을 고른 이유다.
 
-환경변수로 전부 조정한다. 처음에는 기본값(느림)으로 시작해서 익숙해지면 올린다.
+  중앙(데드존)  →  정지
+  위/아래       →  ±x 로 TELEOP_SPEED
+  좌/우         →  ±y 로 TELEOP_SPEED (거울)
+  z 게이지      →  가리키는 높이로 일정 속도, 도달하면 정지
+
+## 경계
+
+교시한 상자(teach_box.py) 밖으로 나가는 **방향의 속도만 0** 으로 만든다.
+위치를 자르는 게 아니라 속도를 막는 것이라, 이번엔 실제 팔에 직접 걸린다.
+정지에도 거리가 필요하므로 경계 BRAKE 안에 들어오면 미리 끊는다.
+
+환경변수로 전부 조정한다.
 """
 import os
 import sys
@@ -37,29 +46,31 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(HERE)
 
-# ── 속도 ──────────────────────────────────────────────────────────
-# 픽앤플레이스는 300mm/s 로 돈다. 조종은 사람이 보면서 따라가야 하므로
-# 1/10 에서 시작한다. 익숙해지면 TELEOP_VEL 을 올린다.
-TELEOP_VEL = float(os.environ.get("TELEOP_VEL", 15.0))    # mm/s
-TELEOP_ACC = float(os.environ.get("TELEOP_ACC", 15.0))    # mm/s^2
-
-# 한 주기에 목표가 움직일 수 있는 최대 거리(mm).
+# ── 속도 ─────────────────────────────────────────────────────────
+# **속도를 직접 지령한다(speedl).** 목표점을 주고 따라가게 하면(servol) 목표가
+# 로봇보다 앞서 달아날 때 컨트롤러가 따라잡으려 가속한다 — 지정 속도를 넘겨
+# 판에 부딪힌 원인이 그것이었다(실측 2026-08-06, 두 번).
+# 속도를 직접 주면 목표점 개념이 없어 그 가속이 원리적으로 생기지 않는다.
 #
-# **속도 상한과 함께 잡아야 한다.** 이 값 × 프레임률이 TELEOP_VEL 을 넘으면
-# 목표점이 로봇보다 빨리 달아나고, 그 격차를 컨트롤러가 따라잡으려 하면서
-# 지정 속도를 초과한다. 실측 2026-08-06: 5mm × 15fps = 75mm/s 가 vel 30mm/s 를
-# 2.5배 앞질러, 손을 멈춰도 로봇이 계속 날아가 판에 부딪혔다.
-#   기준:  STEP_MAX ≤ TELEOP_VEL / 프레임률(≈15) = 15/15 = 1.0
-STEP_MAX = float(os.environ.get("TELEOP_STEP_MAX", 1.0))
+# 십자선 방식: 손이 중앙이면 정지, 방향으로 벗어나면 그 축으로 일정 속도.
+# 얼마나 벗어났는지는 **속도에 영향을 주지 않는다** — 방향만 본다.
+# 속도가 변하지 않아야 예측 가능하고, 그게 이 방식을 고른 이유다.
+TELEOP_SPEED = float(os.environ.get("TELEOP_SPEED", 20.0))   # mm/s
+TELEOP_ACC = float(os.environ.get("TELEOP_ACC", 100.0))      # mm/s^2 (지령 전환 응답)
 
-# 목표점이 **실제 로봇 위치**에서 이보다 멀어지지 못하게 묶는다(밧줄).
-# 위의 STEP_MAX 만으로는 프레임률이 흔들리면 다시 깨진다. 이 밧줄이 있으면
-# 목표가 로봇을 구조적으로 앞지르지 못하고, 손을 멈추면 로봇도 이 거리 안에서
-# 멈춘다 — 오버슛의 상한이 곧 이 값이 된다.
-LEASH = float(os.environ.get("TELEOP_LEASH", 5.0))
+# 십자선 중앙의 정지 구역. 화면 비율(0~1)에서 중앙으로부터 이 반경 안이면 정지.
+DEADZONE = float(os.environ.get("TELEOP_DEADZONE", 0.08))
 
-# 실제 위치를 몇 프레임마다 읽을지. 매 프레임 읽으면 서비스 호출이 비싸다.
-LEASH_EVERY = int(os.environ.get("TELEOP_LEASH_EVERY", 2))
+# z 게이지가 가리키는 높이와 이만큼 안이면 z 정지. 게이지는 높이를 뜻하므로
+# 도달하면 멈춰야 한다 — 방향만 보고 일정 속도로 가되, 다 오면 선다.
+Z_TOL = float(os.environ.get("TELEOP_Z_TOL", 3.0))           # mm
+
+# 경계에 이만큼 다가가면 그 축 속도를 0 으로 만든다. 정지에도 거리가 필요하다.
+BRAKE = float(os.environ.get("TELEOP_BRAKE", 15.0))          # mm
+
+# 백그라운드가 실제 위치를 읽는 주기(초). 경계 판정에만 쓴다.
+# 실제 위치를 몇 프레임마다 읽을지. 경계 판정에만 쓰므로 드물어도 된다.
+POLL_EVERY = int(os.environ.get("TELEOP_POLL_EVERY", 10))
 
 # ── 작업영역 (base 좌표, mm) ─────────────────────────────────────
 # 2026-08-06 교시값. teach_box.py 로 두 모서리를 찍어 얻었다.
@@ -68,18 +79,12 @@ X_MIN = float(os.environ.get("TELEOP_X_MIN", 199.2))
 X_MAX = float(os.environ.get("TELEOP_X_MAX", 566.2))
 Y_MIN = float(os.environ.get("TELEOP_Y_MIN", -231.3))
 Y_MAX = float(os.environ.get("TELEOP_Y_MAX", 280.9))
-Z_MIN = float(os.environ.get("TELEOP_Z_MIN", -13.8))
+Z_MIN = float(os.environ.get("TELEOP_Z_MIN", -17.5))
 Z_MAX = float(os.environ.get("TELEOP_Z_MAX", 218.2))
 
-# 경계를 이만큼 **안쪽으로 물려서** 목표를 자른다.
-#
-# 상자는 목표점에 걸리는데 로봇은 목표를 지나칠 수 있다(밧줄 LEASH 만큼).
-# 실측 2026-08-06: 목표 z 를 20mm 로 막아뒀는데 로봇이 지나쳐 판에 부딪혔다.
-# 여유를 안 두면 "경계까지" 가 "경계를 넘어서" 가 된다.
-# LEASH 보다 크게 잡아 오버슛을 흡수한다 — 교시한 상자 안에 실제 팔이 머문다.
-#
-# 특히 Z_MIN 교시값(-13.8)은 판 표면이다. 여유 없이 쓰면 그대로 찍는다.
-SAFETY_MARGIN = float(os.environ.get("TELEOP_MARGIN", 8.0))
+# 교시 경계에서 이만큼 안쪽을 실제 사용 범위로 삼는다.
+# 속도를 막아도 정지까지 약간 미끄러지므로 여유를 둔다.
+SAFETY_MARGIN = float(os.environ.get("TELEOP_MARGIN", 15.0))
 
 
 def _inner(lo, hi, m=None):
@@ -91,14 +96,13 @@ def _inner(lo, hi, m=None):
     return lo + m, hi - m
 
 
-# 목표를 자를 때 쓰는 값. 실제 팔은 여기에 LEASH 를 더한 범위 안에 머문다.
+# 실제 사용 범위. 이 밖으로 나가는 방향은 속도가 0 이 된다.
 TX_MIN, TX_MAX = _inner(X_MIN, X_MAX)
 TY_MIN, TY_MAX = _inner(Y_MIN, Y_MAX)
 TZ_MIN, TZ_MAX = _inner(Z_MIN, Z_MAX)
 
-# 손이 이만큼 연속으로 안 보이면 목표를 그 자리에 묶는다 (데드맨).
-# 카메라가 가려지거나 사람이 자리를 뜨면 팔이 멈춰야 한다.
-LOST_HOLD = int(os.environ.get("TELEOP_LOST_HOLD", 5))
+# 손이 이만큼 연속으로 안 보이면 속도 0 을 보낸다 (데드맨).
+LOST_HOLD = int(os.environ.get("TELEOP_LOST_HOLD", 3))
 
 # 로봇 연결에 이만큼 못 붙으면 조종을 끄고 화면만 돌린다.
 # DSR 호출이 타임아웃 없이 멈추는 것을 여기서 막는다 (connect 주석 참고).
@@ -112,12 +116,42 @@ TOOLCHARGER_IP, TOOLCHARGER_PORT = "192.168.1.1", "502"
 ROBOT_ID, ROBOT_MODEL = "dsr01", "m0609"
 
 
+# DSR 연결은 **프로세스당 한 번만** 만든다.
+#
+# DSR_ROBOT2 는 import 시점에 g_node 로 서비스 클라이언트를 만들어 모듈에
+# 들고 있는다. 세션마다 노드를 새로 만들고 옛것을 destroy 하면, 그 클라이언트가
+# 파괴된 노드를 가리켜 두 번째 진입부터 명령이 안 나간다.
+# 실측 2026-08-06: 제어 → 작업 → 제어 로 돌아왔을 때 화면은 떴는데 팔이
+# 안 움직였다. 그래서 한 번 만든 것을 계속 재사용한다.
+_DSR = {}
+
+
+def _dsr_connect():
+    """DSR 노드와 함수들을 한 번만 만들어 캐시한다."""
+    if _DSR:
+        return _DSR
+    import rclpy
+    import DR_init
+    DR_init.__dsr__id = ROBOT_ID
+    DR_init.__dsr__model = ROBOT_MODEL
+    if not rclpy.ok():
+        rclpy.init()
+    node = rclpy.create_node("gesture_teleop", namespace=ROBOT_ID)
+    # 모듈 수준 대입이어야 한다. 클래스 안에서 쓰면 이름 맹글링으로
+    # _RobotTeleop__dsr__node 가 되어 DSR_ROBOT2 가 None 을 읽는다.
+    setattr(DR_init, "__dsr__node", node)
+    from DSR_ROBOT2 import speedl, get_current_posx, get_tcp, set_tcp
+    _DSR.update(node=node, speedl=speedl, get_posx=get_current_posx,
+                get_tcp=get_tcp, set_tcp=set_tcp)
+    return _DSR
+
+
 def _clamp(v, lo, hi):
     return lo if v < lo else (hi if v > hi else v)
 
 
 class RobotTeleop:
-    """조종 값(화면 비율 0~1)을 로봇 좌표로 바꿔 servol 로 흘린다.
+    """조종 값(화면 비율 0~1)을 로봇 속도로 바꿔 speedl 로 흘린다.
 
     쓰는 쪽은 매 프레임 update() 만 부르면 된다. 로봇 연결이 안 되면
     enabled=False 로 남아 아무 일도 하지 않는다 — 화면 동작은 그대로다.
@@ -125,13 +159,13 @@ class RobotTeleop:
 
     def __init__(self):
         self.enabled = False
-        self.target = None          # 현재 목표 [x, y, z, rx, ry, rz]
         self.att = None             # 자세는 진입 시점 것을 유지한다
         self.lost = 0
         self._grip_open = None      # 마지막으로 보낸 그리퍼 상태
         self._err = None
-        self._last = None   # 직전 화면 좌표 (증분 계산용)
+        self._last_cmd = None   # 마지막으로 보낸 속도 지령
         self._tick = 0
+        self._pos_cache = None   # 백그라운드가 갱신
 
     # ── 연결 ──
     def connect(self):
@@ -141,27 +175,16 @@ class RobotTeleop:
         기능을 끄는 것으로 끝낸다. 이유는 로그로 남긴다.
         """
         try:
-            import rclpy
-            import DR_init
-            DR_init.__dsr__id = ROBOT_ID
-            DR_init.__dsr__model = ROBOT_MODEL
-            if not rclpy.ok():
-                rclpy.init()
-            node = rclpy.create_node("gesture_teleop", namespace=ROBOT_ID)
-            # 모듈 수준에서 대입해야 한다. 클래스 안에서 쓰면 이름 맹글링으로
-            # _RobotTeleop__dsr__node 가 되어 DSR_ROBOT2 가 None 을 읽는다.
-            setattr(DR_init, "__dsr__node", node)
-            from DSR_ROBOT2 import servol, get_current_posx, get_tcp, set_tcp
-            self._servol = servol
-            self._get_posx = get_current_posx
-            self._node = node
+            d = _dsr_connect()
+            self._speedl = d["speedl"]
+            self._get_posx = d["get_posx"]
+            self._node = d["node"]
 
             # TCP 가 풀려 있으면 좌표계가 달라져 상자 판정이 무의미해진다.
-            # 조종도 같은 TCP 를 전제로 하므로 여기서도 확인한다.
             try:
-                if get_tcp() != EXPECT_TCP:
-                    print(f"  TCP 가 '{get_tcp()}' — '{EXPECT_TCP}' 로 다시 겁니다")
-                    set_tcp(EXPECT_TCP)
+                if d["get_tcp"]() != EXPECT_TCP:
+                    print(f"  TCP 가 '{d['get_tcp']()}' — '{EXPECT_TCP}' 로 다시 겁니다")
+                    d["set_tcp"](EXPECT_TCP)
             except Exception as e:
                 print(f"  TCP 확인 실패({e})")
 
@@ -198,11 +221,8 @@ class RobotTeleop:
             # 진입 시점에 팔이 상자 밖에 있을 수 있다(작업모드가 옮겨둔 자리).
             # 목표를 상자 안으로 넣어 시작한다 — 밖에서 시작하면 첫 명령이
             # 곧바로 경계를 향해 달린다.
-            self.target = list(cur)
-            self.target[0] = _clamp(cur[0], TX_MIN, TX_MAX)
-            self.target[1] = _clamp(cur[1], TY_MIN, TY_MAX)
-            self.target[2] = _clamp(cur[2], TZ_MIN, TZ_MAX)
             self.att = list(cur[3:])
+            self._pos_cache = cur
             self.enabled = True
             print(f"  로봇 조종 연결됨 — 시작 위치 "
                   f"[{cur[0]:.0f}, {cur[1]:.0f}, {cur[2]:.0f}]  "
@@ -219,115 +239,102 @@ class RobotTeleop:
 
     # ── 매 프레임 ──
     def update(self, pos_xy, z_norm, gripper_open, hand_seen):
-        """조종 값을 받아 로봇 목표를 갱신하고 명령을 보낸다.
+        """조종 값을 **속도**로 바꿔 로봇에 보낸다.
 
-        pos_xy       화면 비율 (0~1, 0~1). hand_gesture_control 의 P.pos
-        z_norm       0~1. P.z (0 이 아래, 1 이 위)
+        pos_xy       화면 비율 (0~1, 0~1). 십자선 중앙은 (0.5, 0.5)
+        z_norm       0~1. 게이지가 가리키는 높이
         gripper_open True 면 열기
         hand_seen    이번 프레임에 손이 보였는가 (데드맨)
+
+        방향만 보고 **일정 속도**를 준다. 얼마나 벗어났는지는 속도를 안 바꾼다 —
+        속도가 변하지 않아야 예측 가능하고, 그게 이 방식을 고른 이유다.
         """
         if not self.enabled:
             return
 
-        # 손이 사라지면 목표를 그대로 둔다 = 팔이 지금 자리에 머문다.
+        # 손이 사라지면 즉시 정지 (데드맨)
         if not hand_seen:
             self.lost += 1
             if self.lost >= LOST_HOLD:
-                self._last = None        # 손이 다시 보일 때 튀지 않게 기준을 버린다
+                self._send([0.0, 0.0, 0.0])
                 return
         else:
             self.lost = 0
 
-        # **증분으로 옮긴다.** 절대 매핑을 쓰면 안 된다 — 진입 시점의 팔 위치와
-        # 화면 좌표가 가리키는 곳이 다르므로, 손이 데드존에 가만히 있어도 목표가
-        # 그 차이만큼 계속 기어간다(실측 2026-08-06: 손을 안 움직여도 로봇이
-        # 작업영역 한가운데로 5mm 씩 이동했다).
-        # 화면 좌표의 **변화량**만 반영하면 손이 멈추면 로봇도 멈춘다.
-        cur = (float(pos_xy[0]), float(pos_xy[1]), float(z_norm))
-        if self._last is None:
-            self._last = cur
-            return
-        du, dv = cur[0] - self._last[0], cur[1] - self._last[1]
-        self._last = cur
-
-        # xy 는 **증분**. 조이스틱은 "얼마나 움직일까" 를 주는 상대 입력이다.
-        # z 는 **절대**. 게이지는 "어느 높이" 를 가리키는 절대 입력이라,
-        # 게이지를 맨 아래로 내리면 z 도 최저까지, 맨 위면 최고까지 가야 한다.
-        # 증분으로 다루면 게이지 위치와 실제 높이가 따로 놀아, 맨 아래로 내려도
-        # 바닥에 안 닿는다(실측 2026-08-06).
-        z_want = TZ_MIN + cur[2] * (TZ_MAX - TZ_MIN)
-        d = np.array([-dv * (X_MAX - X_MIN),
-                      -du * (Y_MAX - Y_MIN),
-                      z_want - self.target[2]])
-
-        # 한 주기 이동량 제한. 손이 튀어도 여기서 잘린다.
-        n = float(np.linalg.norm(d))
-        if n < 0.05:
-            return                       # 사실상 정지 — 명령을 보내지 않는다
-        if n > STEP_MAX:
-            d = d * (STEP_MAX / n)
-        want = np.array(self.target[:3]) + d
-        self.target[:3] = [_clamp(want[0], TX_MIN, TX_MAX),
-                           _clamp(want[1], TY_MIN, TY_MAX),
-                           _clamp(want[2], TZ_MIN, TZ_MAX)]
-
-        # ── 밧줄: 목표가 실제 로봇을 앞지르지 못하게 끌어당긴다 ──
+        # 실제 위치는 **메인 스레드에서** 드물게 읽는다.
+        # 백그라운드 스레드로 읽으면 rclpy 전역 실행기를 프레임 읽기와 다퉈
+        # 터진다(실측 2026-08-06: AttributeError __enter__ 로 죽었다).
+        # 속도 지령은 방향만 보므로 위치는 경계 판정에만 쓰이고, BRAKE(15mm)
+        # 여유가 갱신 지연을 흡수한다.
         self._tick += 1
-        if self._tick % LEASH_EVERY == 0:
-            cur = self._read_posx()
-            if cur is not None:
-                gap = np.array(self.target[:3]) - np.array(cur[:3])
-                g = float(np.linalg.norm(gap))
-                if g > LEASH:
-                    self.target[:3] = list(np.array(cur[:3]) + gap * (LEASH / g))
+        if self._tick % POLL_EVERY == 0 or self._pos_cache is None:
+            got = self._read_posx()
+            if got is not None:
+                self._pos_cache = got
 
-        # 마지막 방어선. 밧줄이 목표를 끌어당긴 뒤에도 절대 경계는 넘지 않는다.
-        self.target[0] = _clamp(self.target[0], X_MIN, X_MAX)
-        self.target[1] = _clamp(self.target[1], Y_MIN, Y_MAX)
-        self.target[2] = _clamp(self.target[2], Z_MIN, Z_MAX)
+        cur = self._pos_cache
+        u = float(pos_xy[0]) - 0.5
+        v = float(pos_xy[1]) - 0.5
 
-        try:
-            self._servol(list(self.target), vel=TELEOP_VEL, acc=TELEOP_ACC)
-        except Exception as e:
-            print(f"  servol 실패({e}) — 조종을 끕니다.")
-            self.enabled = False
-            return
+        # ── xy: 십자선. 중앙이면 정지, 벗어난 축으로 일정 속도 ──
+        # 화면 위(v<0)가 로봇 앞(+x), 화면 오른쪽(u>0)이 로봇 왼쪽(+y) — 거울.
+        vx = -TELEOP_SPEED if v > DEADZONE else (TELEOP_SPEED if v < -DEADZONE else 0.0)
+        vy = -TELEOP_SPEED if u > DEADZONE else (TELEOP_SPEED if u < -DEADZONE else 0.0)
 
+        # ── z: 게이지가 가리키는 높이로 일정 속도. 도달하면 정지 ──
+        vz = 0.0
+        if cur is not None:
+            z_want = TZ_MIN + _clamp(float(z_norm), 0.0, 1.0) * (TZ_MAX - TZ_MIN)
+            gap = z_want - cur[2]
+            if abs(gap) > Z_TOL:
+                vz = TELEOP_SPEED if gap > 0 else -TELEOP_SPEED
+
+        # ── 경계: 밖으로 나가는 방향의 속도만 0 으로 ──
+        # 정지에도 거리가 필요하므로 경계 BRAKE 안에 들어오면 미리 끊는다.
+        # 위치가 아니라 **속도**를 막는 것이라, 이번엔 실제 팔에 직접 걸린다.
+        if cur is not None:
+            vx = self._gate(vx, cur[0], TX_MIN, TX_MAX)
+            vy = self._gate(vy, cur[1], TY_MIN, TY_MAX)
+            vz = self._gate(vz, cur[2], TZ_MIN, TZ_MAX)
+        else:
+            # 위치를 모르면 움직이지 않는다. 경계를 확인할 방법이 없다.
+            vx = vy = vz = 0.0
+
+        self._send([vx, vy, vz])
         self._set_gripper(gripper_open)
 
+    @staticmethod
+    def _gate(v, pos, lo, hi):
+        """경계 밖으로 나가는 방향이면 0. 안으로 들어오는 방향은 그대로 둔다."""
+        if v > 0 and pos >= hi - BRAKE:
+            return 0.0
+        if v < 0 and pos <= lo + BRAKE:
+            return 0.0
+        return v
+
+    def _send(self, xyz):
+        """속도 지령. 회전은 항상 0 — 조종은 자세를 안 바꾼다."""
+        if xyz == self._last_cmd:
+            return                      # 같은 지령을 반복해 보내지 않는다
+        self._last_cmd = list(xyz)
+        try:
+            self._speedl([xyz[0], xyz[1], xyz[2], 0.0, 0.0, 0.0],
+                         [TELEOP_ACC, TELEOP_ACC], 0.0)
+        except Exception as e:
+            print(f"  speedl 실패({e}) — 조종을 끕니다.")
+            self.enabled = False
+
     def _read_posx(self):
-        """실제 로봇 위치. 못 읽으면 None — 밧줄만 건너뛰고 조종은 계속한다.
+        """실제 위치. 못 읽으면 None.
 
-        get_current_posx 는 타임아웃이 없어 그냥 부르면 멈출 수 있다(connect 주석
-        참고). 짧은 시간만 기다린다.
+        **메인 스레드에서 직접 부른다.** 스레드로 감싸면 rclpy 전역 실행기를
+        프레임 읽기와 다퉈 터진다(실측 2026-08-06). 여기가 실행기를 쓰는
+        유일한 곳이 되도록 두는 것이 안전하다.
         """
-        import threading
-        box = {}
-
-        def _r():
-            try:
-                box["p"] = self._get_posx()[0]
-            except Exception:
-                pass
-
-        th = threading.Thread(target=_r, daemon=True)
-        th.start()
-        th.join(timeout=0.3)
-        return box.get("p")
-
-    def _map(self, pos_xy, z_norm):
-        """화면 비율 → base 좌표. 항상 작업영역 안으로 clamp 한다."""
-        u = _clamp(float(pos_xy[0]), 0.0, 1.0)
-        v = _clamp(float(pos_xy[1]), 0.0, 1.0)
-        zn = _clamp(float(z_norm), 0.0, 1.0)
-        # 화면 오른쪽이 로봇 +y(왼쪽)가 되도록 뒤집는다 — 거울처럼 보게 해야
-        # 조작이 직관적이다. 화면 위(v=0)가 로봇 앞쪽(+x)이다.
-        x = X_MIN + (1.0 - v) * (X_MAX - X_MIN)
-        y = Y_MAX - u * (Y_MAX - Y_MIN)
-        z = Z_MIN + zn * (Z_MAX - Z_MIN)
-        return [_clamp(x, TX_MIN, TX_MAX),
-                _clamp(y, TY_MIN, TY_MAX),
-                _clamp(z, TZ_MIN, TZ_MAX)]
+        try:
+            return self._get_posx()[0]
+        except Exception:
+            return None
 
     def _set_gripper(self, want_open):
         """상태가 바뀔 때만 보낸다. 매 프레임 모드버스를 두드리면 컨트롤러의
@@ -347,13 +354,20 @@ class RobotTeleop:
         """화면에 겹쳐 보여줄 한 줄."""
         if not self.enabled:
             return "ROBOT OFF" + (f" ({self._err})" if self._err else "")
-        t = self.target
-        return (f"ROBOT [{t[0]:.0f}, {t[1]:.0f}, {t[2]:.0f}]  "
-                f"{TELEOP_VEL:.0f}mm/s")
+        p = self._pos_cache
+        v = self._last_cmd or [0, 0, 0]
+        pos = f"[{p[0]:.0f}, {p[1]:.0f}, {p[2]:.0f}]" if p is not None else "[--]"
+        return f"ROBOT {pos}  v=({v[0]:+.0f},{v[1]:+.0f},{v[2]:+.0f}) mm/s"
 
     def close(self):
-        self.enabled = False
+        """조종만 끈다. **노드는 파괴하지 않는다.**
+
+        DSR 서비스 클라이언트가 이 노드에 묶여 있어, 파괴하면 다음 세션에서
+        명령이 안 나간다(_dsr_connect 주석 참고). 프로세스가 끝날 때 함께 정리된다.
+        """
         try:
-            self._node.destroy_node()
+            self._send([0.0, 0.0, 0.0])    # 나가기 전에 반드시 세운다
         except Exception:
             pass
+        self.enabled = False
+        self._last_cmd = None

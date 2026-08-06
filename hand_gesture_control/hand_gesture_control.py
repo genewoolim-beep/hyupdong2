@@ -434,19 +434,39 @@ def draw_return_hold(screen, hold_sec):
 
 
 def draw_roi(frame):
-    """xy 조이스틱 원 두 개(바깥 원 + 데드존)를 그린다.
+    """xy 십자선을 그린다.
 
-    ROI_R/DEADZONE_R 은 세로 기준 비율이라 픽셀 반지름은 h 를 곱하면 된다
-    (process() 의 종횡비 보정과 같은 이유 — h*x, h*y 가 1:1 픽셀 단위가 된다).
+    로봇 제어가 **속도 지령**이라 방향만 의미가 있다. 중앙 사각(데드존)이면
+    정지, 어느 쪽으로 벗어나든 그 축으로 **일정 속도**다 — 얼마나 벗어났는지는
+    속도를 안 바꾼다. 원(조이스틱)으로 그리면 "멀리 갈수록 빠르다" 로 읽혀
+    실제 동작과 어긋나므로 십자로 바꿨다.
+
+    ROI_R/DEADZONE_R 은 세로 기준 비율이라 픽셀 길이는 h 를 곱하면 된다.
     """
     h, w = frame.shape[:2]
     cx, cy = int(ROI_CX * w), int(ROI_CY * h)
-    r_outer, r_dead = int(ROI_R * h), int(DEADZONE_R * h)
-    cv2.circle(frame, (cx, cy), r_outer, (0, 200, 255), 2, cv2.LINE_AA)
-    cv2.circle(frame, (cx, cy), r_dead, (0, 140, 255), 1, cv2.LINE_AA)
-    cv2.circle(frame, (cx, cy), 3, (0, 200, 255), -1, cv2.LINE_AA)
-    cv2.putText(frame, "xy joystick (left hand)", (cx - r_outer, max(cy - r_outer - 10, 18)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 1, cv2.LINE_AA)
+    arm, dead = int(ROI_R * h), int(DEADZONE_R * h)
+    C, D = (0, 200, 255), (0, 140, 255)
+
+    # 십자 축
+    cv2.line(frame, (cx - arm, cy), (cx + arm, cy), C, 2, cv2.LINE_AA)
+    cv2.line(frame, (cx, cy - arm), (cx, cy + arm), C, 2, cv2.LINE_AA)
+    # 방향 화살촉
+    for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+        tx, ty = cx + dx * arm, cy + dy * arm
+        cv2.circle(frame, (tx, ty), 5, C, -1, cv2.LINE_AA)
+    # 정지 구역 (데드존)
+    cv2.rectangle(frame, (cx - dead, cy - dead), (cx + dead, cy + dead),
+                  D, 1, cv2.LINE_AA)
+    cv2.circle(frame, (cx, cy), 3, C, -1, cv2.LINE_AA)
+
+    for txt, org in (("FWD", (cx - 16, cy - arm - 12)),
+                     ("BACK", (cx - 20, cy + arm + 22)),
+                     ("R", (cx - arm - 22, cy + 5)),
+                     ("L", (cx + arm + 10, cy + 5))):
+        cv2.putText(frame, txt, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, C, 1, cv2.LINE_AA)
+    cv2.putText(frame, "STOP", (cx - 20, cy - dead - 6),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, D, 1, cv2.LINE_AA)
 
 
 def draw_gauge(frame, z):
