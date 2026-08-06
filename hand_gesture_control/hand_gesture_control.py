@@ -12,9 +12,14 @@
 
 오른손: z 축과 그리퍼 제어. xy 를 담당하는 손과 물리적으로 분리했다 — z/그리퍼
   조작 중 손이 흔들려도 xy 좌표가 왜곡되지 않는다.
-  z: 화면 오른쪽의 세로 게이지(GAUGE_CX, GAUGE_Y0~Y1) 안에서 손바닥 높이의
-     절대 위치로 직접 정한다. 게이지 위쪽일수록 z가 높고 아래쪽일수록 낮다 —
-     엄지를 세워 누르고 있는 것보다 직관적이고 정밀하다.
+  z: 화면 오른쪽의 세로 게이지(GAUGE_CX, GAUGE_Y0~Y1) 안에서 손바닥 높이를
+     읽되, xy 십자선과 같은 방식이다 — 게이지를 위/가운데/아래로 3등분해서
+     **가운데(1/3)면 정지**, 위/아래면 그 방향으로 고정 속도로 움직인다
+     (절대 높이로 이동하지 않는다). 가운데를 넓게 잡은 이유는 높이를 그대로
+     유지하려는 의도인데 손떨림으로 살짝만 벗어나도 움직여버리면 고정이 안
+     되기 때문이다. 제어모드에 들어갈 때마다 손·로봇 시작 위치가 달라 절대
+     높이로 매핑하면 진입 즉시 그 차이만큼 갑자기 움직였다 — 상대 방식이라
+     그 문제도 함께 없앤다.
   그리퍼: MediaPipe GestureRecognizer 의 손 모양 실시간 분류로 연다/닫는다.
   Open_Palm  : 그리퍼 열기
   Closed_Fist: 그리퍼 닫기
@@ -234,11 +239,19 @@ Z0 = 0.5
 GRIPPER_OPEN, GRIPPER_CLOSED = 1.0, 0.0
 
 # z 게이지: 화면 오른쪽에 놓인 세로로 긴 영역. 손바닥(PALM_CENTER) 높이가
-# GAUGE_Y0(위쪽 끝, z=1)~GAUGE_Y1(아래쪽 끝, z=0) 사이 어디인지로 z를 절대
-# 위치로 직접 정한다 — xy 조이스틱과 달리 여긴 데드존/속도가 아니라 게이지다.
+# GAUGE_Y0(위쪽 끝, z=1)~GAUGE_Y1(아래쪽 끝, z=0) 사이 어디인지로 0~1 을 만든다.
+# 그 값은 **절대 높이가 아니라 방향 신호**다 — 0.5 가 중앙(정지)이고, 위/아래로
+# Z_DEADZONE 넘게 벗어나면 그 방향으로 일정 속도다(robot_teleop.update 참고).
 GAUGE_CX = 0.83           # 화면 오른쪽 끝에 더 가깝게
 GAUGE_Y0, GAUGE_Y1 = 0.15, 0.85
 GAUGE_HALF_W = 0.05       # 그리는/판정하는 폭의 절반 (프레임 비율)
+
+# 게이지를 위/가운데(정지)/아래로 3등분하는 경계. **로봇이 쓰는 값을 그대로
+# 가져온다** — 여기에 같은 숫자를 또 적으면 한쪽만 고쳐졌을 때 화면의 STOP 칸과
+# 실제로 멈추는 구간이 어긋난다. 그 어긋남은 "가만히 있는데 팔이 내려간다" 로
+# 나타나므로 눈으로 알아채기 어렵다.
+# robot_teleop 은 import 만으로 로봇도 rclpy 도 건드리지 않는다(상수뿐).
+from robot_teleop import Z_DEADZONE                       # noqa: E402
 
 # z 손떨림 억제: 원시 z를 Z_SMOOTH_N 프레임 평균으로 다듬은 뒤, 그 값이 현재
 # self.z 에서 Z_DEADBAND 이상 벌어져야만 실제로 반영한다. 평균만으로는 계속
@@ -407,13 +420,31 @@ def draw_hand(img, px, highlight=WRIST):
     cv2.circle(img, tuple(px[highlight].astype(int)), 8, (0, 255, 120), 2, cv2.LINE_AA)
 
 
-def draw_z_gauge(screen, z):
+def draw_z_gauge(screen, teleop, z_range):
+    """screen 패널에 실제 로봇의 z 높이(mm)를 연속 값으로 보여준다.
+
+    camera 창의 3등분 게이지(draw_gauge)는 조작 **입력** 상태(위/정지/아래
+    중 어디 있는지)를 보여주는 것이고, 여기는 반대로 지금 로봇이 실제로
+    어디 있는지 보여주는 **상태** 표시다 — 실제 높이는 연속값이므로 여기는
+    3등분하지 않는다. --robot 없이는(또는 아직 위치를 못 읽었으면) "Z --"만
+    표시한다.
+    """
     x0, x1 = screen.shape[1] - 90, screen.shape[1] - 50
     y0, y1 = 40, screen.shape[0] - 40
     cv2.rectangle(screen, (x0, y0), (x1, y1), (70, 64, 58), 2, cv2.LINE_AA)
-    fy = int(y1 - z * (y1 - y0))
+
+    pos = teleop.cur_pos() if (teleop is not None and teleop.enabled) else None
+    if pos is None:
+        cv2.putText(screen, "Z --", (x0 - 10, y0 - 12), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55, (110, 110, 110), 1, cv2.LINE_AA)
+        return
+
+    z_mm = pos[2]
+    zmin, zmax = z_range
+    frac = float(np.clip((z_mm - zmin) / (zmax - zmin), 0.0, 1.0))
+    fy = int(y1 - frac * (y1 - y0))
     cv2.rectangle(screen, (x0, fy), (x1, y1), (70, 255, 150), -1, cv2.LINE_AA)
-    cv2.putText(screen, f"Z {z:.2f}", (x0 - 6, y0 - 12), cv2.FONT_HERSHEY_SIMPLEX,
+    cv2.putText(screen, f"Z {z_mm:.0f}mm", (x0 - 24, y0 - 12), cv2.FONT_HERSHEY_SIMPLEX,
                 0.55, (200, 200, 200), 1, cv2.LINE_AA)
 
 
@@ -423,6 +454,23 @@ def draw_gripper(screen, gripper):
     col = (70, 255, 150) if open_ else (80, 90, 255)
     cv2.putText(screen, txt, (30, screen.shape[0] - 30), cv2.FONT_HERSHEY_SIMPLEX,
                 0.8, col, 2, cv2.LINE_AA)
+
+
+def draw_robot_coords(screen, teleop):
+    """실제 로봇의 현재 좌표(mm)를 표시한다.
+
+    xy 초록 점/z 게이지는 로컬 입력 상태(조이스틱 목표점, 십자선 구간)일
+    뿐 실제 로봇 위치가 아니다 — 실제 좌표는 --robot 으로 연결된 teleop 이
+    로봇에서 직접 읽어온 값이라 여기서 따로 보여준다.
+    """
+    x, y = 30, screen.shape[0] - 66
+    if teleop is None:
+        cv2.putText(screen, "ROBOT: --robot 없이 실행 중 (연결 안 됨)", (x, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (110, 110, 110), 1, cv2.LINE_AA)
+        return
+    col = (70, 255, 150) if teleop.enabled else (80, 90, 255)
+    cv2.putText(screen, teleop.status(), (x, y), cv2.FONT_HERSHEY_SIMPLEX,
+                0.6, col, 2, cv2.LINE_AA)
 
 
 def draw_return_hold(screen, hold_sec):
@@ -475,18 +523,50 @@ def draw_roi(frame):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, D, 1, cv2.LINE_AA)
 
 
+def z_zone(z):
+    """게이지 값(0~1)이 지금 어느 구간인가. "UP" | "STOP" | "DOWN"
+
+    화면과 로봇이 **같은 판단**을 쓰게 하는 한 곳이다. 여기와 robot_teleop 의
+    vz 계산이 갈라지면 화면에는 STOP 인데 팔이 내려가는 상태가 되고, 그건
+    눈으로 알아채기 어렵다. 그래서 경계값(Z_DEADZONE)도 그쪽에서 가져온다.
+    """
+    off = float(z) - 0.5
+    return "UP" if off > Z_DEADZONE else ("DOWN" if off < -Z_DEADZONE else "STOP")
+
+
 def draw_gauge(frame, z):
-    """z 게이지(세로 사각형)를 그린다. 지금 z 값만큼 아래에서부터 채운다."""
+    """z 게이지 — 위/가운데(정지)/아래 3등분한 **정적** 위젯이다.
+
+    xy 십자선(draw_roi)과 똑같은 이유로 손 높이를 따라 계속 움직이는 표시를
+    두지 않는다. 실제 손 위치는 draw_hand()가 그리는 손 스켈레톤이 이미
+    보여주므로, 여기서는 지금 어느 구간(위/정지/아래)이 활성인지만 그 구간을
+    밝혀서 보여준다 — 값이 아니라 상태를 표시한다.
+    """
     h, w = frame.shape[:2]
     cx = int(GAUGE_CX * w)
     y0, y1 = int(GAUGE_Y0 * h), int(GAUGE_Y1 * h)
     half_w = int(GAUGE_HALF_W * h)
     x0, x1 = cx - half_w, cx + half_w
-    cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 200, 255), 2, cv2.LINE_AA)
-    fill_y = int(y1 - z * (y1 - y0))
-    cv2.rectangle(frame, (x0 + 3, fill_y), (x1 - 3, y1 - 3), (0, 200, 255), -1, cv2.LINE_AA)
-    cv2.putText(frame, "z gauge", (x0 - 10, max(y0 - 10, 18)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 1, cv2.LINE_AA)
+    ymid = (y0 + y1) // 2
+    dead_px = int(Z_DEADZONE * (y1 - y0))
+    up_edge, down_edge = ymid - dead_px, ymid + dead_px   # 3등분 경계
+
+    zone = z_zone(z)
+
+    ON, OFF_UD, OFF_STOP = (0, 200, 255), (55, 50, 46), (45, 60, 58)
+    cv2.rectangle(frame, (x0 + 2, y0), (x1 - 2, up_edge),
+                  ON if zone == "UP" else OFF_UD, -1, cv2.LINE_AA)
+    cv2.rectangle(frame, (x0 + 2, up_edge), (x1 - 2, down_edge),
+                  (0, 140, 255) if zone == "STOP" else OFF_STOP, -1, cv2.LINE_AA)
+    cv2.rectangle(frame, (x0 + 2, down_edge), (x1 - 2, y1),
+                  ON if zone == "DOWN" else OFF_UD, -1, cv2.LINE_AA)
+    cv2.rectangle(frame, (x0, y0), (x1, y1), ON, 2, cv2.LINE_AA)
+    cv2.line(frame, (x0, up_edge), (x1, up_edge), (30, 30, 30), 1, cv2.LINE_AA)
+    cv2.line(frame, (x0, down_edge), (x1, down_edge), (30, 30, 30), 1, cv2.LINE_AA)
+
+    cv2.putText(frame, "UP", (x0 - 8, y0 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, ON, 1, cv2.LINE_AA)
+    cv2.putText(frame, "DOWN", (x0 - 24, y1 + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, ON, 1, cv2.LINE_AA)
+    cv2.putText(frame, "STOP", (x0 - 60, ymid + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 140, 255), 1, cv2.LINE_AA)
 
 
 def draw_key_legend(screen, x=20, y=30, line_h=22):
@@ -510,10 +590,12 @@ def run_session():
     ok, frame = False, None
     _last_ping = [0.0]
     teleop = None
+    z_range = (0.0, 1.0)   # --robot 없으면 draw_z_gauge 는 어차피 "Z --"만 표시하므로 값은 안 씀
     if USE_ROBOT:
-        from robot_teleop import RobotTeleop
+        from robot_teleop import RobotTeleop, Z_MIN, Z_MAX
         teleop = RobotTeleop()
         teleop.connect()
+        z_range = (Z_MIN, Z_MAX)
     # ROS 토픽은 구독 등록 직후 첫 메시지가 올 때까지 약간 지연될 수 있다 —
     # v4l2 는 보통 첫 시도에 바로 성공하지만 최대 5초까지 같이 기다려준다.
     for _ in range(50):
@@ -600,8 +682,9 @@ def run_session():
             cv2.circle(screen, (cx, cy), rad, col, -1, cv2.LINE_AA)
         cv2.circle(screen, (cx, cy), 4, (255, 255, 255), -1, cv2.LINE_AA)
 
-        draw_z_gauge(screen, P.z)
+        draw_z_gauge(screen, teleop, z_range)
         draw_gripper(screen, P.gripper)
+        draw_robot_coords(screen, teleop)
         draw_key_legend(screen)
         draw_return_hold(screen, P.both_open_hold)
 

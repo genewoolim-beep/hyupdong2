@@ -56,8 +56,8 @@ def _load():
     if GESTURE_DIR not in sys.path:
         sys.path.insert(0, GESTURE_DIR)
     import hand_gesture_control as hg
-    from robot_teleop import RobotTeleop
-    return hg, RobotTeleop
+    import robot_teleop as rt
+    return hg, rt
 
 
 def run(cap, dsr, gripper, on_frame=None, should_stop=None,
@@ -74,9 +74,9 @@ def run(cap, dsr, gripper, on_frame=None, should_stop=None,
     max_sec     이 시간을 넘으면 스스로 나간다. 사람이 안 보는 채로 속도 지령을
                 받는 상태로 남지 않게 하는 상한이다.
     """
-    hg, RobotTeleop = _load()
+    hg, rt = _load()
 
-    teleop = RobotTeleop(dsr=dsr, gripper=gripper)
+    teleop = rt.RobotTeleop(dsr=dsr, gripper=gripper)
     if not teleop.connect():
         # 여기서 실패하면 팔을 움직일 수 없다. 화면만 띄워두면 사람은 조종이
         # 되는 줄 알고 손을 흔든다 — 그냥 작업모드로 돌려보낸다.
@@ -117,14 +117,19 @@ def run(cap, dsr, gripper, on_frame=None, should_stop=None,
             seen = xy_hand is not None or gesture_hand is not None
             teleop.update(vec, P.z, P.gripper > 0.5, seen)
 
+            # 입력(십자선·3등분 게이지)과 상태(로봇 실제 z)를 나란히 둔다.
+            # 단독 실행에서는 상태가 screen 창에 따로 있었지만 여기는 창이
+            # 하나뿐이다 — 조종하면서 실제 높이를 못 보면 판에 얼마나 가까운지
+            # 알 방법이 없다.
             hg.draw_roi(frame)
             hg.draw_gauge(frame, P.z)
+            hg.draw_z_gauge(frame, teleop, (rt.Z_MIN, rt.Z_MAX))
             if xy_hand is not None:
                 hg.draw_hand(frame, xy_hand[1], highlight=hg.INDEX_TIP)
             if gesture_hand is not None:
                 hg.draw_hand(frame, gesture_hand, highlight=hg.PALM_CENTER)
             hg.draw_return_hold(frame, P.both_open_hold)
-            _overlay(frame, P, teleop, fps)
+            _overlay(frame, P, teleop, fps, hg)
 
             if on_frame is not None:
                 on_frame(frame)
@@ -154,15 +159,19 @@ def run(cap, dsr, gripper, on_frame=None, should_stop=None,
         cv2.waitKey(1)      # 창이 실제로 닫히도록 한 번 돌린다
 
 
-def _overlay(frame, P, teleop, fps):
-    h, w = frame.shape[:2]
+def _overlay(frame, P, teleop, fps, hg):
+    h = frame.shape[0]
     cv2.putText(frame, teleop.status(), (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                 (0, 255, 0) if teleop.enabled else (0, 0, 255), 2, cv2.LINE_AA)
-    cv2.putText(frame, f"gesture={P.gesture}({P.gesture_score:.2f})  z={P.z:.2f}  "
+    # z 는 값이 아니라 구간(UP/STOP/DOWN)으로 보여준다 — 0~1 숫자는 절대 높이로
+    # 읽히기 쉽지만 실제로는 방향 신호다. 구간 판정은 화면·로봇이 같은 것을 쓴다.
+    cv2.putText(frame, f"gesture={P.gesture}({P.gesture_score:.2f})  "
+                       f"z={hg.z_zone(P.z)}  "
                        f"gripper={'OPEN' if P.gripper > 0.5 else 'CLOSED'}",
                 (12, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(frame, "Q back to work mode   R reset z/gripper",
                 (12, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (200, 200, 200), 1,
                 cv2.LINE_AA)
-    cv2.putText(frame, f"{fps:.0f} fps", (w - 130, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                0.8, (120, 255, 120), 2, cv2.LINE_AA)
+    # fps 를 오른쪽 위에 두면 draw_z_gauge 의 "Z ..mm" 글자와 겹친다.
+    cv2.putText(frame, f"{fps:.0f} fps", (12, 82), cv2.FONT_HERSHEY_SIMPLEX,
+                0.6, (120, 255, 120), 2, cv2.LINE_AA)

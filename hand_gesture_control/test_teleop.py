@@ -52,21 +52,22 @@ def make(pos=None):
     return t, g, p
 
 
-def z_at(pos_z, t):
-    """지금 z 에서 게이지를 그 높이로 맞춘 정규값 (z 속도 0 이 되게)."""
-    return (pos_z - rt.TZ_MIN) / (rt.TZ_MAX - rt.TZ_MIN)
+# z 게이지도 xy 와 같은 방향 신호다. 0.5 가 중앙(정지), 위/아래로
+# Z_DEADZONE(1/6) 넘게 벗어나면 그 방향. **절대 높이가 아니다** — 로봇의
+# 지금 z 와 무관하다(2026-08-06 팀원 변경: 진입 시점 영점 조절이 필요 없어짐).
+Z_STOP = 0.5
 
 
 # ── 1. 중앙(데드존)이면 정지 ──
 t, g, p = make()
-zc = z_at(p[2], t)
+zc = Z_STOP
 t.update((0.0, 0.0), zc, True, True)
 assert sent == [[0.0, 0.0, 0.0]], sent
 print(f"1 중앙 → 정지            {sent[-1]}")
 
 # ── 2. 방향만 보고 일정 속도. 얼마나 벗어났는지는 속도를 안 바꾼다 ──
 t, g, p = make()
-zc = z_at(p[2], t)
+zc = Z_STOP
 t.update((0.0, -0.2), zc, True, True)      # 화면 위 → 로봇 앞(+x)
 a = sent[-1]
 t.update((0.0, -1.0), zc, True, True)      # 다섯 배 벗어나도
@@ -79,21 +80,21 @@ print(f"2 편차 0.2 와 1.0 이 같은 속도  {a}   (매 프레임 갱신: {le
 
 # ── 3. 좌우는 거울 ──
 t, g, p = make()
-zc = z_at(p[2], t)
+zc = Z_STOP
 t.update((0.6, 0.0), zc, True, True)
 assert sent[-1] == [0.0, -rt.TELEOP_SPEED, 0.0], sent[-1]
 print(f"3 화면 오른쪽 → -y        {sent[-1]}")
 
 # ── 4. 대각선은 두 축 동시 ──
 t, g, p = make()
-zc = z_at(p[2], t)
+zc = Z_STOP
 t.update((-0.5, -0.5), zc, True, True)
 assert sent[-1] == [rt.TELEOP_SPEED, rt.TELEOP_SPEED, 0.0], sent[-1]
 print(f"4 대각선 → 두 축          {sent[-1]}")
 
 # ── 5. 손이 사라지면 정지 (데드맨) ──
 t, g, p = make()
-zc = z_at(p[2], t)
+zc = Z_STOP
 t.update((0.0, -0.5), zc, True, True)
 for _ in range(rt.LOST_HOLD):
     t.update((0.0, -0.5), zc, True, False)
@@ -102,26 +103,43 @@ print(f"5 손 사라짐 {rt.LOST_HOLD}프레임 → 정지  {sent[-1]}")
 
 # ── 6. 경계: 밖으로 나가는 방향만 0, 안으로는 그대로 ──
 t, g, p = make([rt.TX_MAX - 1.0, 0.0, 100.0, 0.0, 180.0, 0.0])
-zc = z_at(p[2], t)
+zc = Z_STOP
 t.update((0.0, -0.5), zc, True, True)       # +x = 밖
 assert sent[-1][0] == 0.0, sent[-1]
 t.update((0.0, 0.5), zc, True, True)        # -x = 안
 assert sent[-1][0] == -rt.TELEOP_SPEED, sent[-1]
 print(f"6 경계 밖 방향 0 / 안 방향 유지   x={rt.TX_MAX:.0f} 근처")
 
-# ── 7. z 게이지: 가리키는 높이로 가고 도달하면 선다 ──
+# ── 7. z 게이지도 십자선. 가운데 정지, 위/아래로 일정 속도 ──
+#     로봇의 지금 z 와 무관해야 한다 — 그게 절대 매핑을 버린 이유다.
+#     시작 높이는 경계 브레이크 구간(상하 15mm) 밖으로 고른다. 그 안에서는
+#     경계 쪽 방향이 0 이 되는 게 정상이다(6번에서 따로 확인한다).
+for start_z in (50.0, 100.0, 150.0):
+    t, g, p = make([400.0, 0.0, start_z, 0.0, 180.0, 0.0])
+    t.update((0.0, 0.0), 1.0, True, True)              # 게이지 최상 → 위로
+    assert sent[-1][2] == rt.TELEOP_SPEED, (start_z, sent[-1])
+    t.update((0.0, 0.0), 0.0, True, True)              # 최하 → 아래로
+    assert sent[-1][2] == -rt.TELEOP_SPEED, (start_z, sent[-1])
+    t.update((0.0, 0.0), Z_STOP, True, True)           # 가운데 → 정지
+    assert sent[-1][2] == 0.0, (start_z, sent[-1])
+# 데드존 경계 바로 안쪽은 정지여야 한다 (높이를 유지하려는 조작)
 t, g, p = make()
-t.update((0.0, 0.0), 1.0, True, True)       # 게이지 최상 → 위로
-assert sent[-1][2] == rt.TELEOP_SPEED, sent[-1]
-t.update((0.0, 0.0), 0.0, True, True)       # 게이지 최하 → 아래로
-assert sent[-1][2] == -rt.TELEOP_SPEED, sent[-1]
-t.update((0.0, 0.0), z_at(p[2], t), True, True)   # 지금 높이 → 정지
+t.update((0.0, 0.0), 0.5 + rt.Z_DEADZONE * 0.9, True, True)
 assert sent[-1][2] == 0.0, sent[-1]
-print(f"7 z 게이지 위/아래/도달정지   {rt.TZ_MIN:.0f}~{rt.TZ_MAX:.0f}mm")
+print(f"7 z 십자선 위/정지/아래       데드존 ±{rt.Z_DEADZONE:.3f} "
+      f"(시작 높이 50/100/150mm 에서 같은 결과)")
+
+# ── 7b. z 도 경계에서 그 방향만 막힌다 ──
+t, g, p = make([400.0, 0.0, rt.TZ_MIN + 1.0, 0.0, 180.0, 0.0])   # 바닥 근처
+t.update((0.0, 0.0), 0.0, True, True)        # 아래로 = 밖
+assert sent[-1][2] == 0.0, sent[-1]
+t.update((0.0, 0.0), 1.0, True, True)        # 위로 = 안
+assert sent[-1][2] == rt.TELEOP_SPEED, sent[-1]
+print(f"7b 바닥({rt.TZ_MIN:.0f}mm) 근처 → 하강만 차단")
 
 # ── 8. 그리퍼는 바뀔 때만 보낸다 ──
 t, g, p = make()
-zc = z_at(p[2], t)
+zc = Z_STOP
 for want in (True, True, True, False, False, True):
     t.update((0.0, 0.0), zc, want, True)
 assert g.log == ["open", "close", "open"], g.log
@@ -129,7 +147,7 @@ print(f"8 그리퍼 변화만 전송      {g.log}")
 
 # ── 9. 나갈 때 반드시 속도 0 ──
 t, g, p = make()
-t.update((0.0, -0.5), z_at(p[2], t), True, True)
+t.update((0.0, -0.5), Z_STOP, True, True)
 t.close()
 assert sent[-1] == [0.0, 0.0, 0.0], sent
 assert not t.enabled
@@ -148,7 +166,7 @@ print("10 위치 불명 → 조종 안 켜짐 (지령 0건)")
 
 # ── 11. 정지·역방향 지령이 실제로 나간다 (벤더 검증 통과) ──
 t, g, p = make()
-zc = z_at(p[2], t)
+zc = Z_STOP
 t.update((0.0, 0.5), zc, True, True)        # -x
 t.update((0.6, 0.0), zc, True, True)        # -y
 t.update((0.0, 0.0), zc, True, True)        # 정지
