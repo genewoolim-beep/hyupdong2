@@ -6,9 +6,9 @@ Doosan M0609 협동로봇을 대상으로 한 프로젝트들. 각 폴더가 독
 |---|---|---|---|
 | [`voice_pickandplace/`](voice_pickandplace/) | 음성 기반 Pick & Place | 음성 | 동작 확인 |
 | `sign_control/` + `sign_processing` | 수어 기반 로봇 제어 | 수어 | 동작 확인 (물체 인식만) |
-| [`block_sort/`](block_sort/) | 색 블록 구역 분류 + 배치 복제 | 수어 / 텍스트 | 실주행 확인 (복제 4/4) |
+| [`block_sort/`](block_sort/) | 색 블록 구역 분류 + 배치 복제 **+ 손동작 조종(제어모드)** | 수어 / 손동작 / 텍스트 | 작업모드 실주행 확인 (복제 4/4), 제어모드는 로봇 검증 대기 |
 | [`signbot_admin/`](signbot_admin/) | 관리자 대시보드 (카메라·문장·구역·로봇 상태 통합) | — (Flask 웹) | UI 동작 확인, 로봇 상시 연동은 진행 중 |
-| [`hand_gesture_control/`](hand_gesture_control/) | 손 위치/제스처로 로봇팔 xy/z/그리퍼 직접 조종 | 손동작 | UI·모드 전환 동작 확인, 실제 로봇 구동은 미연동 |
+| [`hand_gesture_control/`](hand_gesture_control/) | 손동작 인식·조종 로직 (제어모드의 몸통) | 손동작 | 인식 확인. **로봇 구동은 `block_sort` 안에서 돈다** |
 
 ---
 
@@ -239,6 +239,38 @@ source ~/doosan-voice-pickandplace/voice_pickandplace/install/setup.bash   # od_
 
 파지 정확도를 좌우하는 값들은 코드 상단 주석에 실측 근거와 함께 적혀 있다.
 판이나 조명이 바뀌면 `center` → `calib-zones` 순으로 다시 잰다.
+
+### 제어모드 — 손동작으로 팔을 직접 밀기
+
+수어로 `모드변경` 을 서명하면 **같은 프로세스 안에서** 손동작 조종이 열린다.
+왼손을 십자선에서 벗어난 방향으로 두면 그 축으로 20mm/s, 오른손 높이로 z,
+주먹/펼침으로 그리퍼다. 돌아오는 방법 셋: **양손 3초 펴기 / 조종창 Q /
+대시보드에서 작업모드 전환.**
+
+```
+수어 '모드변경' → go_home() → 조종 창 (손동작 → speedl) → 작업모드 복귀
+```
+
+**왜 한 프로세스인가.** 전에는 조종이 `hand_gesture_control.py` 라는 별
+프로세스였다. 한 로봇에 DSR 연결이 둘이 되어 TCP 조회가 0.0mm 로 풀리고,
+모션이 전부 거부되고, `get_current_posx()` 가 응답 없이 멎었다(실측
+2026-08-06). 조종을 안으로 들여 **DSR 연결·그리퍼·웹캠을 하나로** 공유한다
+([block_sort/teleop_mode.py](block_sort/teleop_mode.py)).
+
+**속도를 지령한다(`speedl`).** 위치를 주면(`movel`/`servol`) 목표가 로봇보다
+앞서 달아날 때 컨트롤러가 따라잡으려 가속한다 — 지정 속도를 넘겨 판에 부딪힌
+원인이 그것이었다. 속도를 직접 주면 그 가속이 원리적으로 안 생긴다.
+방향만 보고 **일정 속도**이며, 손이 사라지면 즉시 0(데드맨), 교시 상자
+(`teach_box.py` → `teleop_box.env`) 밖으로 나가는 **방향의 속도만** 0 이 된다.
+
+작업영역을 다시 잡으려면 로봇을 수동 모드로 두고:
+
+```bash
+python3 hand_gesture_control/teach_box.py     # 두 모서리를 찍어 teleop_box.env 로 저장
+```
+
+`hand_gesture_control.py` 를 따로 띄우는 것은 **인식 확인용**이다. 작업모드와
+함께 쓸 때 `--robot` 을 붙이면 DSR 연결이 둘로 돌아가므로 붙이지 않는다.
 
 ### signbot_admin 연동
 

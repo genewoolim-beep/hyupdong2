@@ -44,9 +44,12 @@ robot_state = {
 # tcp.length_mm 는 설정값이 아니라 로봇이 지금 쓰고 있는 실측이다 — 같은 순간의
 # TCP 좌표와 플랜지 좌표를 읽어 그 차이를 잰다. 공구를 바꾸면 바로 반영된다.
 # cameras 는 각 영상 토픽에 발행자가 있는지다. USB 가 빠지면 False 로 떨어진다.
-# hand_gesture_control.py 가 살아 있다는 신호. 대기 중에도 계속 보낸다.
-# block_sort 가 '모드변경' 을 받았을 때 **받아줄 상대가 있는지** 확인하는 데 쓴다.
-# 없는데 넘기면 아무도 work 로 되돌려주지 않아 작업모드가 멈춘다(2026-08-06 실측).
+# 지금 제어모드를 잡고 있는 프로세스가 살아 있다는 신호.
+# 2026-08-06 이후 제어모드는 block_sort 안에서 도므로 block_sort 가 보낸다.
+# 뜻이 뒤집혔다 — 전에는 '넘길 상대가 있는가' 였고, 지금은 block_sort 가
+# 제어모드에 들어가기 전에 '**남이** 이미 잡고 있는가' 를 보는 데 쓴다
+# (둘이 speedl 을 쏘면 한 로봇에 지령이 둘이 된다).
+# hand_gesture_control.py --admin 을 단독으로 쓸 때도 같은 신호를 보낸다.
 control_alive = {"at": None}
 
 hardware_state = {
@@ -102,8 +105,10 @@ debug_logs = []
 
 # 지금 어느 인터페이스가 활성인지. work(작업모드 — 수어로 로봇에 명령) /
 # control(제어모드 — 사람이 손동작으로 로봇을 직접 조종).
-# sign_demo.py --admin 이 "모드변경" 글로스를 확정하면 control 로,
-# hand_gesture_control.py --admin 이 양손 3초 유지를 감지하면 work 로 보고한다.
+# block_sort.py sign --admin 이 "모드변경" 글로스를 확정하면 control 로,
+# 제어모드에서 나올 때(양손 3초 / Q / 여기서 전환) work 로 보고한다.
+# 여기서 work 로 돌리면 제어모드가 그것을 보고 스스로 빠져나온다 —
+# 대시보드가 조종을 끊는 유일한 길이다.
 MODE_LABEL = {"work": "작업모드", "control": "제어모드"}
 system_mode = {"mode": "work", "updated_at": "-"}
 
@@ -338,8 +343,8 @@ latest_control_frame = {"jpg": None}
 @app.route("/api/frame/control", methods=["POST"])
 def api_frame_control():
     """
-    hand_gesture_control.py --admin 이 매 프레임(camera 창 — 실카메라+조이스틱
-    원+손 스켈레톤+z 게이지, JPEG 바이트)을 이 엔드포인트로 POST하면
+    제어모드(block_sort/teleop_mode.py)가 매 프레임(실카메라 + 십자선 +
+    손 스켈레톤 + z 게이지, JPEG 바이트)을 이 엔드포인트로 POST하면
     /control_video_feed 가 그 화면을 그대로 중계합니다.
     /api/frame(작업모드 카메라)과 별도 버퍼다 — 같은 걸 쓰면 두 화면이 서로 덮어쓴다.
     """

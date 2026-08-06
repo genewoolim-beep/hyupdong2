@@ -67,6 +67,12 @@ USE_ADMIN = "--admin" in sys.argv
 # --robot 을 붙여야 실제 로봇이 움직인다. 기본은 화면만 — 손동작 인식을
 # 먼저 눈으로 확인하고 나서 팔을 붙이는 순서가 안전하다.
 # 속도·작업영역은 robot_teleop.py 의 환경변수로 조정한다.
+#
+# **작업모드(block_sort.py sign)와 함께 쓸 때는 --robot 을 붙이지 않는다.**
+# 2026-08-06 이후 제어모드는 block_sort 안에서 돈다(block_sort/teleop_mode.py).
+# 여기서도 로봇에 붙으면 한 로봇에 DSR 연결이 둘이 되어, TCP 가 0.0mm 로 풀리고
+# 모션이 거부되고 위치 조회가 멎는다 — 합친 이유가 그것이다.
+# --robot 이 남아 있는 것은 작업모드를 안 쓰는 PC(로봇 + 웹캠만)를 위해서다.
 USE_ROBOT = "--robot" in sys.argv
 
 
@@ -565,7 +571,11 @@ def run_session():
         if teleop is not None:
             # 손이 하나라도 보이면 살아있는 것으로 본다 (데드맨).
             seen = xy_hand is not None or gesture_hand is not None
-            teleop.update(P.pos, P.z, P.gripper > 0.5, seen)
+            # **지금 벗어난 방향**을 준다. 누적 목표점(P.pos)이 아니다 —
+            # 누적값은 손을 중앙으로 되돌려도 벗어난 채 남아 팔이 계속 기어간다
+            # (실측 2026-08-06: 데드존 안에 손이 있는데 로봇이 움직였다).
+            vec = xy_hand[0] if xy_hand is not None else (0.0, 0.0)
+            teleop.update(vec, P.z, P.gripper > 0.5, seen)
         draw_roi(frame)
         draw_gauge(frame, P.z)
         if xy_hand is not None:

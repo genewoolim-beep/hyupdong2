@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 # 이 저장소의 노드들을 한 터미널에서 **순서대로** 띄운다.
 #
-#   ./run_all.sh                    # 작업모드 한 벌 (realsense detect webcam admin sign)
-#   ./run_all.sh all                # 위 + 제어모드(gesture bridge)
+#   ./run_all.sh                    # 한 벌 전부 (realsense detect webcam admin gui bridge sign)
 #   ./run_all.sh realsense detect   # 골라서
 #   ./run_all.sh --list             # 타깃 설명만 보고 끝
 #
 # Ctrl+C 한 번으로 **이 스크립트가 띄운 것만** 정리한다. 로봇 드라이버는 안 건드린다.
 #
 # ── 왜 순서와 대기가 필요한가 ─────────────────────────────────────
-# detect 는 RealSense 프레임을 받아야 초기화가 끝나고, sign/gesture 는 webcam
-# 토픽을 구독하며, sign/gesture/bridge 는 admin 에 상태를 올린다. 동시에 띄우면
-# 뒤엣것이 앞엣것을 못 찾는다. 그래서 단계마다 준비될 때까지 실제로 기다린다
+# detect 는 RealSense 프레임을 받아야 초기화가 끝나고, sign 은 webcam 토픽을
+# 구독하며, sign/bridge 는 admin 에 상태를 올린다. 동시에 띄우면 뒤엣것이
+# 앞엣것을 못 찾는다. 그래서 단계마다 준비될 때까지 실제로 기다린다
 # (sleep 으로 때우면 느린 날 실패한다).
 #
 # ── 로봇 드라이버는 왜 여기 없나 ──────────────────────────────────
@@ -20,15 +19,14 @@
 #   ros2 launch m0609_rg2_bringup bringup.launch.py mode:=real host:=192.168.1.100 model:=m0609
 #
 # ── 모드 전환 ─────────────────────────────────────────────────────
-# sign 과 gesture 는 **함께 떠 있어야** 모드 전환이 성립한다. gesture 가 없으면
-# block_sort 가 '모드변경' 을 받아도 넘길 곳이 없다(이제는 넘기지 않고 거절한다).
-# 그래서 둘 다 기본 타깃이다. 제어모드에서 작업모드로 돌아오는 방법은 셋이다:
+# 제어모드(손동작 조종)는 이제 **sign 프로세스 안에서** 돈다. 따로 띄울 타깃이
+# 없다 — '모드변경' 을 서명하면 그 안에서 조종 창이 열린다.
+# 한 로봇에 DSR 연결을 하나만 두기 위한 것이다(block_sort/teleop_mode.py).
+# 제어모드에서 작업모드로 돌아오는 방법은 셋이다:
 #   ① 양손 Open_Palm 3초   ② 조종창에서 Q   ③ 대시보드에서 작업모드로 전환
 #
-# ── 알려진 제약 ───────────────────────────────────────────────────
-# 둘 다 각자 DSR 에 연결한다. 실측 2026-08-06: 함께 떠 있을 때 TCP 조회가
-# 0.0mm 로 깨지고 모션이 거부된 적이 있다. 이상하면 `./run_all.sh` 대신
-# 작업모드만(`realsense detect webcam admin gui sign`) 띄워 볼 것.
+# hand_gesture_control.py 를 따로 띄우지 말 것. --robot 까지 붙이면 DSR 연결이
+# 둘이 되어 예전 증상(TCP 0.0mm, 모션 거부)이 그대로 돌아온다.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,8 +44,8 @@ export SIGN_SOURCE="${SIGN_SOURCE:-ros}"
 export GESTURE_SOURCE="${GESTURE_SOURCE:-ros}"
 export DISPLAY="${DISPLAY:-:1}"
 
-ALL_TARGETS=(realsense detect webcam admin gui sign gesture bridge)
-DEFAULT_TARGETS=(realsense detect webcam admin gui bridge sign gesture)
+ALL_TARGETS=(realsense detect webcam admin gui bridge sign)
+DEFAULT_TARGETS=("${ALL_TARGETS[@]}")
 
 if [[ "${1:-}" == "--list" ]]; then
     printf '%s\n' \
@@ -56,19 +54,26 @@ if [[ "${1:-}" == "--list" ]]; then
         "  webcam     웹캠 → ROS 토픽 발행      (수어·손동작의 원천)" \
         "  admin      signbot_admin 대시보드    :5000" \
         "  gui        브라우저로 대시보드 열기   ← admin 필요" \
-        "  sign       작업모드: 수어 → 블록 분류 [로봇 움직임]  ← webcam detect admin" \
-        "  gesture    제어모드: 손동작 조종      [로봇 움직임]  ← webcam admin" \
+        "  sign       작업모드 + 제어모드 ('모드변경' 서명 시 조종) [로봇 움직임]" \
+        "             ← webcam detect admin" \
         "  bridge     로봇 시점을 제어 화면으로 중계            ← realsense admin"
     exit 0
 fi
 
-if [[ $# -eq 0 ]]; then
+if [[ $# -eq 0 || "${1:-}" == "all" ]]; then
     TARGETS=("${DEFAULT_TARGETS[@]}")
-elif [[ "${1:-}" == "all" ]]; then
-    TARGETS=("${ALL_TARGETS[@]}")
 else
     TARGETS=("$@")
 fi
+# gesture 는 sign 안으로 들어갔다. 옛 명령줄을 그대로 쓰는 사람이 조용히
+# 아무것도 못 얻는 것보다, 왜 없어졌는지 알려주는 편이 낫다.
+for t in "${TARGETS[@]}"; do
+    if [[ "$t" == "gesture" ]]; then
+        echo "  ! gesture 타깃은 없어졌습니다 — 제어모드가 sign 안으로 들어갔습니다."
+        echo "    sign 을 띄운 뒤 '모드변경' 을 서명하면 조종 창이 열립니다."
+        exit 1
+    fi
+done
 
 want() { local t; for t in "${TARGETS[@]}"; do [[ "$t" == "$1" ]] && return 0; done; return 1; }
 
@@ -142,7 +147,7 @@ wait_http() {    # wait_http <url> [초]
 # ── 시작 전 점검 ──
 # 이전 실행이 남아 있으면 새로 뜬 것이 죽는다. 특히 webcam_publisher 는 V4L2
 # 장치를 독점하므로, 남아 있으면 새 것이 "프레임을 못 받았습니다" 로 종료되고
-# 그 뒤 sign/gesture 가 토픽을 못 받아 줄줄이 무너진다.
+# 그 뒤 sign 이 프레임을 못 받아 줄줄이 무너진다.
 # 실측 2026-08-06: 이것 때문에 제어모드가 켜지자마자 작업모드로 튕겼다.
 STALE=$(pgrep -f "lib/sign_processing/webcam_publisher|lib/object_detection/object_detection|realsense2_camera_node|realsense_bridge.py|hand_gesture_control.py|block_sort.py sign|signbot_admin/app.py" 2>/dev/null | tr '\n' ' ')
 if [[ -n "${STALE// /}" ]]; then
@@ -155,7 +160,7 @@ fi
 
 echo "타깃: ${TARGETS[*]}"
 if ! pgrep -f ros2_control_node >/dev/null 2>&1; then
-    echo "  ! 로봇 드라이버가 안 보입니다 — sign/gesture 는 로봇을 못 움직입니다."
+    echo "  ! 로봇 드라이버가 안 보입니다 — sign 이 로봇을 못 움직입니다."
     echo "    ros2 launch m0609_rg2_bringup bringup.launch.py mode:=real host:=192.168.1.100 model:=m0609"
 fi
 echo
@@ -170,10 +175,10 @@ fi
 
 if want webcam; then
     launch webcam ros2 run sign_processing webcam_publisher
-    # sign 과 gesture 가 이 토픽에 전적으로 의존한다. 없는데 진행하면
-    # 둘 다 프레임을 못 받아 조용히 헛돌거나 모드가 튕긴다. 여기서 멈춘다.
+    # sign 이 이 토픽에 전적으로 의존한다 — 수어도 손동작도 여기서 온다.
+    # 없는데 진행하면 프레임을 못 받아 조용히 헛돈다. 여기서 멈춘다.
     if ! wait_topic /webcam/image_raw/compressed 20; then
-        echo "  ! 웹캠 발행이 안 됩니다 — sign/gesture 가 동작할 수 없어 중단합니다."
+        echo "  ! 웹캠 발행이 안 됩니다 — sign 이 동작할 수 없어 중단합니다."
         echo "    다른 프로세스가 장치를 잡고 있는지 확인하세요:"
         echo "      v4l2-ctl --list-devices"
         exit 1
@@ -215,11 +220,6 @@ fi
 if want sign; then
     launch sign env PYTHONUNBUFFERED=1 SIGN_SHOW_WINDOW=1 \
         python3 -u "$BLOCK_DIR/block_sort.py" sign --admin
-fi
-
-if want gesture; then
-    launch gesture env PYTHONUNBUFFERED=1 \
-        python3 -u "$GESTURE_DIR/hand_gesture_control.py" --admin --robot
 fi
 
 echo

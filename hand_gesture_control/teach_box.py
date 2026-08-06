@@ -85,9 +85,10 @@ def main():
             print(f"  {ax}  {lo[i]:8.1f} ~ {hi[i]:8.1f}   (폭 {size[i]:.0f}mm)")
         print("=" * 52)
 
-        # 상자는 **목표점**에 걸리고 로봇은 밧줄(기본 20mm)만큼 지나칠 수 있다.
-        # 벽이나 판에 닿으면 안 되므로 그 사실을 여기서 짚어준다.
-        print("\n주의: 실제 도달 범위는 이보다 사방 20mm 넓습니다(밧줄 여유).")
+        # 경계는 **밖으로 나가는 방향의 속도를 0 으로** 만드는 방식이다. 정지에도
+        # 거리가 필요하므로 실제로는 안쪽에서 미리 끊고(BRAKE 15mm, MARGIN 15mm),
+        # 그래도 조금 미끄러진다. 벽·판에 가까운 쪽은 여유를 두고 잡는 게 좋다.
+        print("\n주의: 경계 30mm 안쪽에서 그 방향 속도가 0 이 되고, 정지까지 조금 더 갑니다.")
         print("      벽·판에 가까운 쪽은 그만큼 안쪽으로 잡으세요.\n")
 
         env = (f"TELEOP_X_MIN={lo[0]:.1f} TELEOP_X_MAX={hi[0]:.1f} "
@@ -96,9 +97,12 @@ def main():
         with open(OUT, "w", encoding="utf-8") as f:
             f.write(env + "\n")
         print(f"저장됨: {OUT}\n")
-        print("이 값으로 조종을 띄우려면:\n")
-        print(f"  {env} \\")
-        print("  GESTURE_SOURCE=ros DISPLAY=:1 python3 hand_gesture_control.py --admin --robot\n")
+        # robot_teleop.py 가 이 파일을 직접 읽는다. 환경변수로 다시 적어줄 필요가
+        # 없다 — 두 곳에 적으면 갈라지고, 갈라지면 팔이 판에 부딪히는 쪽이 된다.
+        print("조종(제어모드)은 다음 실행부터 이 값을 그대로 씁니다.")
+        print("제어모드는 작업모드 안에서 돕니다 — 수어로 '모드변경' 을 하세요:\n")
+        print("  cd .. && ./run_all.sh\n")
+        print(f"환경변수로 한 번만 다르게 쓰려면:\n\n  {env}\n")
     finally:
         node.destroy_node()
         if rclpy.ok():

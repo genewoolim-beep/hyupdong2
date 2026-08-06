@@ -20,6 +20,9 @@ sign 모드는 sign_control 에서 학습한 제스처 분류기로 글로스를
 LLM 이 (색, 구역) 목록으로 바꾼다. 해석 부분만 따로 확인하려면 로봇 없이
 `python3 sign_command.py parse "빨강 3번구역 놓다"` 를 쓴다.
 
+sign 모드에서 '모드변경' 을 서명하면 **손동작 조종(제어모드)** 으로 넘어간다.
+같은 프로세스 안에서 돈다 — DSR 연결을 하나로 두려는 것이다(teleop_mode.py).
+
 블록 전용 YOLO 모델이 아직 없으므로, 지금은 과일/공구 클래스를 대역으로
 써서 파이프라인을 검증한다. 모델이 생기면 대상 이름만 바꾸면 된다.
 """
@@ -126,7 +129,8 @@ MOVE_TOL = float(os.environ.get("MOVE_TOL", 8.0))
 CAM_STALE_SEC = float(os.environ.get("CAM_STALE_SEC", 3.0))
 
 # 제어모드에 머무를 수 있는 최대 시간(초). 넘으면 스스로 작업모드로 돌아온다.
-# 조종 프로세스가 안 떠 있거나 도중에 죽으면 되돌려줄 사람이 없기 때문이다.
+# 손이 사라지면 속도 0 이 나가지만(데드맨), 그래도 사람이 안 보는 채로 팔이
+# 속도 지령을 받는 상태로 남지 않게 상한을 둔다.
 CONTROL_MAX_SEC = float(os.environ.get("CONTROL_MAX_SEC", 600.0))
 
 # 컨트롤러가 명령을 거부했을 때 다시 넣기 전에 기다리는 시간(초).
@@ -193,7 +197,10 @@ _dsr = rclpy.create_node("block_sort_dsr", namespace=ROBOT_ID)
 DR_init.__dsr__node = _dsr
 
 try:
-    from DSR_ROBOT2 import (movej as _movej_raw, movel as _movel_raw,
+    # speedl 은 제어모드(손동작 조종) 몫이다. 여기서 함께 가져오는 이유는
+    # DSR 연결을 하나로 두기 위해서다 — 조종 모듈이 자기 노드를 만들면 한
+    # 로봇에 두 연결이 되어 TCP 가 풀리고 모션이 거부된다(teleop_mode 참고).
+    from DSR_ROBOT2 import (movej as _movej_raw, movel as _movel_raw, speedl,
                             get_current_posx, mwait, get_robot_state, STATE_STANDBY,
                             get_current_tool_flange_posx, get_tcp, set_tcp)
 except ImportError as e:
@@ -227,15 +234,81 @@ def _admin_post(path, payload):
 
 
 # ── 작업모드 ↔ 제어모드 ──────────────────────────────────────────────
-# 로봇을 움직이는 인터페이스가 둘이다. 이쪽(수어 블록 분류)이 '작업모드',
-# hand_gesture_control.py(손동작 조종)가 '제어모드'다. 둘이 동시에 로봇을
-# 잡으면 안 되므로 signbot_admin 의 /api/mode 를 한 곳의 진실로 삼는다.
-# sign_demo.py 가 먼저 이 규약을 썼는데 block_sort 에는 빠져 있었다.
-# 여기가 실제로 로봇을 움직이는 쪽이라, 빠져 있으면 제어모드 중에 수어가
-# 오인식됐을 때 팔이 멋대로 나간다.
+# 인터페이스가 둘이다. 수어로 블록을 분류하는 것이 '작업모드', 손동작으로
+# 팔을 직접 미는 것이 '제어모드'다. **둘 다 이 프로세스가 돈다.**
+#
+# 전에는 제어모드가 hand_gesture_control.py 라는 별 프로세스였다. 한 로봇에
+# DSR 연결이 둘이 되어 TCP 가 0.0mm 로 풀리고 모션이 거부되고 위치 조회가
+# 멎었다(실측 2026-08-06). 그래서 조종을 이 안으로 들여왔다 — teleop_mode.py.
+# 대시보드의 /api/mode 는 그대로 쓴다. 지금 어느 인터페이스가 활성인지
+# 화면에 보여주고, 대시보드에서 작업모드로 되돌리는 길이 되기 때문이다.
 def push_mode(mode):
     """지금 활성 인터페이스를 대시보드에 알린다. work | control"""
     _admin_post("/api/mode", {"mode": mode})
+
+
+_ctrl_frame = {"jpg": None, "lock": None, "started": False}
+
+
+def control_frame_sink():
+    """제어 화면 한 장을 받아 대시보드(/api/frame/control)로 중계하는 콜백.
+
+    --admin 이 아니면 None — 부르는 쪽은 아무것도 안 보낸다.
+    작업모드 화면(/api/frame)과 **버퍼가 다르다.** 같은 것을 쓰면 두 화면이
+    서로 덮어써 둘 다 깜빡인다 (signbot_admin/app.py 의 주석과 같은 이유).
+
+    보내는 일은 별 스레드가 자기 페이스로 한다. 조종 루프가 전송을 기다리면
+    프레임률이 네트워크에 묶이고, 그러면 팔이 손보다 늦게 선다.
+    """
+    if not USE_ADMIN:
+        return None
+    import threading
+    import urllib.request
+    import cv2
+
+    if _ctrl_frame["lock"] is None:
+        _ctrl_frame["lock"] = threading.Lock()
+
+    def _sender():
+        while True:
+            with _ctrl_frame["lock"]:
+                data = _ctrl_frame["jpg"]
+            if data is not None:
+                try:
+                    req = urllib.request.Request(
+                        f"{ADMIN_URL}/api/frame/control", data=data,
+                        headers={"Content-Type": "image/jpeg"}, method="POST")
+                    urllib.request.urlopen(req, timeout=1.0)
+                except Exception:
+                    pass
+            time.sleep(0.08)          # 모니터링용이라 12fps 상한이면 충분하다
+
+    if not _ctrl_frame["started"]:    # 제어모드를 여러 번 들락거려도 스레드는 하나
+        _ctrl_frame["started"] = True
+        threading.Thread(target=_sender, daemon=True).start()
+
+    def _sink(frame):
+        ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+        if ok:
+            with _ctrl_frame["lock"]:
+                _ctrl_frame["jpg"] = buf.tobytes()
+
+    return _sink
+
+
+_alive_sent_at = [0.0]      # 이 프로세스가 마지막으로 alive 를 보낸 시각
+
+
+def push_control_alive():
+    """제어모드를 지금 이 프로세스가 잡고 있다고 대시보드에 알린다.
+
+    조종이 별 프로세스였을 때 '받아줄 상대가 있는가' 를 보려고 만든 신호다.
+    이제 넘길 상대가 없으니 판단에는 안 쓰지만, 계속 보낸다 — 밖에서
+    hand_gesture_control.py 를 띄웠을 때 '이미 누가 잡고 있다' 를 볼
+    유일한 창구이고, 그쪽도 같은 신호를 쓴다(control_taken 참고).
+    """
+    _alive_sent_at[0] = time.time()
+    _admin_post("/api/control/alive", {})
 
 
 # 이 이름의 TCP 가 걸려 있어야 한다. 시작할 때 확인하고 다르면 다시 건다.
@@ -320,16 +393,25 @@ def tcp_info():
         return {"name": None, "length_mm": None, "offset_mm": None, "error": str(e)}
 
 
-def control_ready():
-    """제어 프로세스(hand_gesture_control.py)가 받아줄 준비가 됐는가.
+def control_taken():
+    """**다른** 프로세스가 제어모드를 잡고 있는가.
 
-    없는데 넘기면 아무도 work 로 되돌려주지 않아 작업모드가 멈춘다
-    (2026-08-06 실측: 모드변경 후 아무 반응 없이 대기만 했다).
-    --admin 이 아니면 확인할 방법이 없으므로 True 로 둔다 — 그 경우는
-    대시보드 연동 자체를 안 쓰는 것이라 판단을 미룬다.
+    전에는 이 신호를 '넘길 상대가 있는가' 로 썼다. 조종이 이 안으로 들어온
+    뒤로는 뜻이 뒤집혔다 — 밖에 조종 프로세스가 살아 있으면 그쪽도 DSR 에
+    붙어 speedl 을 쏜다. 한 로봇에 지령이 둘이면 위험하므로, 그럴 때는
+    제어모드로 들어가지 않는다.
+
+    엔드포인트는 마지막 시각 하나만 들고 있어 누가 보냈는지 구별하지 못한다.
+    그래서 **이쪽이 최근에 보냈으면 남의 것으로 보지 않는다.** 이 판단이 없으면
+    제어모드에서 막 나온 뒤 10초 안에 다시 '모드변경' 을 하면, 방금 이 프로세스가
+    남긴 신호를 남의 것으로 읽어 스스로를 막는다.
     """
     if not USE_ADMIN:
-        return True
+        return False
+    # 서버가 신선하다고 보는 창(10초)보다 넉넉히. 이 안에 이쪽이 보낸 게 있으면
+    # 지금 신선한 신호는 그것일 수 있다 — 남의 것이라고 단정할 근거가 없다.
+    if time.time() - _alive_sent_at[0] < 12.0:
+        return False
     import json
     import urllib.request
     try:
@@ -1632,6 +1714,77 @@ class BlockSort(Node):
         cams["detection"] = bool(self.cli.service_is_ready())
         _admin_post("/api/hardware", {"tcp": tcp_info(), "cameras": cams})
 
+    def run_teleop(self, rec):
+        """제어모드 — 손동작으로 팔을 직접 민다. 돌아올 때까지 여기서 머문다.
+
+        **이 프로세스의 DSR 연결과 그리퍼를 그대로 넘긴다.** 조종이 별
+        프로세스였을 때 한 로봇에 연결이 둘이 되어 TCP 가 풀리고 모션이
+        거부됐다(teleop_mode.py 머리말 참고).
+
+        웹캠도 수어 인식기가 열어둔 것을 그대로 쓴다. V4L2 는 한 프로세스만
+        열 수 있고, ROS 토픽이라도 같은 프로세스에서 두 번 구독할 이유가 없다.
+        """
+        if control_taken():
+            # 밖에 조종 프로세스가 살아 있다. 그쪽도 DSR 에 붙어 speedl 을
+            # 쏘므로 한 로봇에 지령이 둘이 된다 — 들어가지 않는다.
+            self.get_logger().error(
+                "밖에서 hand_gesture_control.py 가 돌고 있습니다 — 제어모드는 "
+                "이제 이 프로세스 안에서 돕니다. 그 프로세스를 끄고 다시 하세요.")
+            push_debug("warn", "모드",
+                       "외부 조종 프로세스가 떠 있어 모드변경을 취소했습니다")
+            return False
+
+        import threading
+        sys.path.insert(0, HERE)
+        import teleop_mode
+
+        self.get_logger().warn(
+            "⇄ 모드변경 — 제어모드. 돌아오는 방법 셋: "
+            "양손 3초 펴기 / 조종창 Q / 대시보드에서 작업모드 전환.")
+        push_mode("control")
+        push_debug("info", "모드", "제어모드 — 손동작 조종")
+        self.go_home()          # 조종은 알려진 자세에서 시작한다
+        push_control_alive()    # 이 프로세스가 제어를 잡았다
+
+        # 대시보드 왕복은 **별 스레드**에서 한다. 조종 루프에서 직접 부르면
+        # HTTP 타임아웃 1초 동안 프레임 읽기도 경계 판정도 멈춘다 — 속도 지령은
+        # 명령을 안 보내도 계속 움직이므로, 그 1초에 팔은 20mm 를 더 간다.
+        # 이 스레드는 urllib 만 쓴다. rclpy 를 건드리면 전역 실행기를 다퉈
+        # 터진다(실측 2026-08-06).
+        watch = {"stop": False, "run": True}
+
+        def _watch():
+            while watch["run"]:
+                push_control_alive()
+                if get_mode(default="control") != "control":
+                    watch["stop"] = True     # 대시보드에서 작업모드로 돌렸다
+                    return
+                time.sleep(1.0)
+
+        threading.Thread(target=_watch, daemon=True).start()
+
+        try:
+            why = teleop_mode.run(
+                rec._camera(),          # 수어 인식기가 쓰는 그 카메라 (위 docstring)
+                dsr={"speedl": speedl, "get_posx": get_current_posx},
+                gripper=gripper,
+                on_frame=control_frame_sink(),
+                should_stop=lambda: watch["stop"],
+                max_sec=CONTROL_MAX_SEC,
+                log=self.get_logger().info)
+        except Exception as e:
+            # 조종이 터져도 작업모드는 살아 있어야 한다. 이유를 남기고 복귀한다.
+            self.get_logger().error(f"제어모드 오류: {e}")
+            push_debug("error", "제어모드", str(e))
+            why = f"오류: {e}"
+        finally:
+            watch["run"] = False
+            push_mode("work")
+
+        self.get_logger().warn(f"⇄ 작업모드로 복귀했습니다 — {why}")
+        push_debug("info", "모드", f"작업모드 복귀 — {why}")
+        return True
+
     def run_sign(self, once=False):
         """수어 한 문장 → LLM 해석 → 구역 배치. 기본은 반복이다.
 
@@ -1676,46 +1829,12 @@ class BlockSort(Node):
             glosses, steps, how = got
             text = " ".join(glosses)
             if sc.MODE_GLOSS in glosses:
-                # 손동작 제어로 넘긴다. 여기서 그냥 계속 돌면 제어모드 중에
-                # 수어가 오인식됐을 때 팔이 멋대로 나가므로, 대시보드가 work 로
-                # 돌아왔다고 알려줄 때까지 명령을 받지 않는다.
-                if not control_ready():
-                    # 받아줄 상대가 없으면 아예 넘기지 않는다. 넘겼다가 멈추는
-                    # 것보다 그대로 작업모드에 있는 편이 낫다.
-                    self.get_logger().error(
-                        "제어 프로세스가 없어 모드를 바꾸지 않습니다 — "
-                        "hand_gesture_control.py --admin --robot 을 먼저 띄우세요.")
-                    push_debug("warn", "모드",
-                               "제어 프로세스가 없어 모드변경을 취소했습니다")
-                    if once:
-                        return False
-                    continue
-                self.get_logger().warn(
-                    "⇄ 모드변경 — 제어모드로 넘깁니다. 돌아오는 방법 셋: "
-                    "양손 3초 펴기 / 조종창 Q / 대시보드에서 작업모드 전환.")
-                push_mode("control")
-                self.go_home()
-                # 조종 쪽이 안 떠 있으면 아무도 work 로 되돌려주지 않는다.
-                # 그러면 여기서 영영 기다린다 — 실측 2026-08-06 에 그렇게 멈췄다.
-                # 시간을 정해두고, 지나면 스스로 작업모드로 돌아온다.
-                t0 = time.time()
-                while get_mode() == "control":
-                    # 조종 프로세스가 도중에 죽으면 기다릴 이유가 없다. 바로 복귀한다.
-                    if not control_ready():
-                        self.get_logger().warn(
-                            "제어 프로세스가 사라져 작업모드로 복귀합니다.")
-                        push_mode("work")
-                        break
-                    if time.time() - t0 > CONTROL_MAX_SEC:
-                        self.get_logger().warn(
-                            f"제어모드가 {CONTROL_MAX_SEC:.0f}초를 넘겨 스스로 복귀합니다 "
-                            "— hand_gesture_control.py 가 떠 있는지 확인하세요.")
-                        push_mode("work")
-                        break
-                    time.sleep(0.5)
-                self.get_logger().warn("⇄ 작업모드로 복귀했습니다.")
+                # 손동작 조종으로 넘어간다. **같은 프로세스 안에서** 돈다 —
+                # 이 함수가 돌아올 때까지 수어 명령은 받지 않으므로, 제어모드
+                # 중에 수어가 오인식돼 팔이 멋대로 나가는 일도 없다.
+                ok = self.run_teleop(rec)
                 if once:
-                    return True
+                    return ok
                 continue
             if not steps:
                 self.get_logger().warn(f"'{text}' 를 해석하지 못했습니다 — 다시 하세요.")
