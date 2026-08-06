@@ -44,6 +44,11 @@ robot_state = {
 # tcp.length_mm 는 설정값이 아니라 로봇이 지금 쓰고 있는 실측이다 — 같은 순간의
 # TCP 좌표와 플랜지 좌표를 읽어 그 차이를 잰다. 공구를 바꾸면 바로 반영된다.
 # cameras 는 각 영상 토픽에 발행자가 있는지다. USB 가 빠지면 False 로 떨어진다.
+# hand_gesture_control.py 가 살아 있다는 신호. 대기 중에도 계속 보낸다.
+# block_sort 가 '모드변경' 을 받았을 때 **받아줄 상대가 있는지** 확인하는 데 쓴다.
+# 없는데 넘기면 아무도 work 로 되돌려주지 않아 작업모드가 멈춘다(2026-08-06 실측).
+control_alive = {"at": None}
+
 hardware_state = {
     "tcp": {"name": None, "length_mm": None, "offset_mm": None},
     "cameras": {"realsense": False, "webcam": False, "detection": False},
@@ -393,6 +398,22 @@ def api_debug_add():
 def api_mode():
     """상단 배지 · 제어 화면 폴링용. 지금 활성 인터페이스(work/control)를 반환한다."""
     return jsonify(system_mode)
+
+
+@app.route("/api/control/alive")
+def api_control_alive():
+    """제어 프로세스가 최근에 신호를 보냈는가. block_sort 가 전환 전에 확인한다."""
+    at = control_alive["at"]
+    fresh = at is not None and (datetime.now() - at).total_seconds() < 10
+    return jsonify({"alive": fresh,
+                    "at": at.strftime("%H:%M:%S") if at else None})
+
+
+@app.route("/api/control/alive", methods=["POST"])
+def api_control_alive_update():
+    """hand_gesture_control.py 가 주기적으로 두드린다 (대기 중에도)."""
+    control_alive["at"] = datetime.now()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/mode", methods=["POST"])

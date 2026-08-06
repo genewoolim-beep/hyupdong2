@@ -264,7 +264,23 @@ class RosFrames:
         return True
 
     def read(self):
-        self._rclpy.spin_once(self._node, timeout_sec=0.02)
+        # 토픽은 항상 최신 한 장만 들고 있어 낡은 프레임을 버릴 필요가 없다.
+        #
+        # 종료 신호가 오면 main 의 finally 가 rclpy.shutdown() 을 부르는데,
+        # 이 루프는 매 프레임 spin_once 를 부르므로 그 사이에 걸리면 무효
+        # 컨텍스트로 타이머를 만들려다 터진다(실측 2026-08-06: RCLError,
+        # "the given context is not valid"). 종료 중이면 마지막 프레임을
+        # 돌려주고 빠진다 — 부르는 쪽은 곧 루프를 벗어난다.
+        if not self._rclpy.ok():
+            # 종료 중이다. 바쁜 대기가 되지 않게 잠깐 쉬고 '프레임 없음' 을
+            # 돌려준다 — 부르는 쪽 루프가 정상적으로 빠져나가게 한다.
+            time.sleep(0.05)
+            return False, None
+        try:
+            self._rclpy.spin_once(self._node, timeout_sec=0.02)
+        except Exception:
+            time.sleep(0.05)
+            return False, None
         return (self._frame is not None), self._frame
 
     def release(self):

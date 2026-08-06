@@ -125,6 +125,10 @@ MOVE_TOL = float(os.environ.get("MOVE_TOL", 8.0))
 # 이 판정이 없으면 끊긴 걸 알 방법이 없다 (push_hardware 주석 참고).
 CAM_STALE_SEC = float(os.environ.get("CAM_STALE_SEC", 3.0))
 
+# 제어모드에 머무를 수 있는 최대 시간(초). 넘으면 스스로 작업모드로 돌아온다.
+# 조종 프로세스가 안 떠 있거나 도중에 죽으면 되돌려줄 사람이 없기 때문이다.
+CONTROL_MAX_SEC = float(os.environ.get("CONTROL_MAX_SEC", 600.0))
+
 # 컨트롤러가 명령을 거부했을 때 다시 넣기 전에 기다리는 시간(초).
 # 재시도마다 이 값의 배수로 늘린다 — 거부는 큐가 비면 풀리므로 조금 기다리는
 # 것이 곧바로 다시 넣는 것보다 빨리 성공한다.
@@ -144,6 +148,10 @@ APPROACH_Z = float(os.environ.get("APPROACH_Z", 120.0))
 # 순회에서 봐 둔 자리와 다시 봤을 때의 자리가 이보다 벌어지면 다른 블록으로 본다.
 # 실측 2026-08-04: 한계가 없어 250mm 떨어진 같은 색을 집으러 갔다.
 CACHE_TOLERANCE = 70.0
+
+# 구역 지정 명령에서 '그 구역의 블록' 으로 인정할 최대 거리(mm).
+# 구역 반경(45)보다 넉넉히 두되, 옆 구역(간격 150)까지 넘어가면 안 된다.
+ZONE_PICK_MAX = float(os.environ.get("ZONE_PICK_MAX", 75.0))
 
 # 특정 색만 찾아 다시 돌 때 건너뛸 앞쪽 경유점 수.
 #   1번  인간구역 관측용이라 프리 블록이 없다
@@ -187,7 +195,7 @@ DR_init.__dsr__node = _dsr
 try:
     from DSR_ROBOT2 import (movej as _movej_raw, movel as _movel_raw,
                             get_current_posx, mwait, get_robot_state, STATE_STANDBY,
-                            get_current_tool_flange_posx, get_tcp)
+                            get_current_tool_flange_posx, get_tcp, set_tcp)
 except ImportError as e:
     sys.exit(f"DSR_ROBOT2 임포트 실패: {e}\n로봇 드라이버가 떠 있는지 확인하세요.")
 
@@ -230,6 +238,59 @@ def push_mode(mode):
     _admin_post("/api/mode", {"mode": mode})
 
 
+# 이 이름의 TCP 가 걸려 있어야 한다. 시작할 때 확인하고 다르면 다시 건다.
+# 실측 2026-08-06: 두 프로세스가 각자 DSR 에 붙었을 때 TCP 가 빈 값으로 풀려
+# 조회가 0.0mm 로 나왔다. 그 상태로 파지하면 좌표가 통째로 어긋난다 —
+# 티칭값이 전부 이 TCP 기준이기 때문이다.
+EXPECT_TCP = os.environ.get("EXPECT_TCP", "GripperDA_v1")
+# 그 TCP 의 실측 길이(mm)와 허용 오차. 이름이 맞아도 길이가 0 이면
+# 오프셋이 풀린 것이다 — 실측 2026-08-06 에 그렇게 깨진 적이 있다.
+EXPECT_TCP_MM = float(os.environ.get("EXPECT_TCP_MM", 250.0))
+TCP_TOL_MM = float(os.environ.get("TCP_TOL_MM", 5.0))
+
+
+def ensure_tcp(logger=None):
+    """걸린 TCP 가 EXPECT_TCP 인지 보고, 아니면 다시 건다.
+
+    빈 문자열이나 다른 이름이면 set_tcp 로 되돌린다. 실패해도 예외는 안 올린다 —
+    알리는 것까지가 여기 몫이고, 판단은 사람이 한다.
+    """
+    def say(msg):
+        (logger.warn if logger else print)(msg)
+
+    def ok_now():
+        """이름과 **길이**가 둘 다 맞는가.
+
+        이름만 보면 부족하다. 이름이 남아 있어도 실제 오프셋이 풀려 길이가
+        0 으로 읽히는 경우가 있다 — 그 상태로 파지하면 좌표가 250mm 어긋난다.
+        길이는 TCP 좌표와 플랜지 좌표의 차이로 잰다(tcp_info 참고).
+        """
+        name = get_tcp()
+        info = tcp_info()
+        length = info.get("length_mm")
+        good = (isinstance(name, str) and name == EXPECT_TCP
+                and length is not None and abs(length - EXPECT_TCP_MM) <= TCP_TOL_MM)
+        return good, name, length
+
+    try:
+        good, name, length = ok_now()
+        if good:
+            return True
+        say(f"TCP 가 '{name}' / 길이 {length}mm 입니다 — "
+            f"'{EXPECT_TCP}'({EXPECT_TCP_MM:.0f}mm) 로 다시 겁니다")
+        set_tcp(EXPECT_TCP)
+        good, name, length = ok_now()
+        if good:
+            say(f"TCP 복구됨: {EXPECT_TCP}  {length:.1f}mm")
+            return True
+        say(f"TCP 를 못 걸었습니다 (지금 '{name}' / {length}mm) "
+            "— 티치펜던트에서 확인하세요. 이대로 파지하면 좌표가 어긋납니다.")
+        return False
+    except Exception as e:
+        say(f"TCP 확인 실패({e})")
+        return False
+
+
 def tcp_info():
     """지금 걸린 TCP 의 이름과 **플랜지에서의 거리**(mm).
 
@@ -257,6 +318,25 @@ def tcp_info():
                 "error": None}
     except Exception as e:
         return {"name": None, "length_mm": None, "offset_mm": None, "error": str(e)}
+
+
+def control_ready():
+    """제어 프로세스(hand_gesture_control.py)가 받아줄 준비가 됐는가.
+
+    없는데 넘기면 아무도 work 로 되돌려주지 않아 작업모드가 멈춘다
+    (2026-08-06 실측: 모드변경 후 아무 반응 없이 대기만 했다).
+    --admin 이 아니면 확인할 방법이 없으므로 True 로 둔다 — 그 경우는
+    대시보드 연동 자체를 안 쓰는 것이라 판단을 미룬다.
+    """
+    if not USE_ADMIN:
+        return True
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{ADMIN_URL}/api/control/alive", timeout=1.0) as r:
+            return bool(json.loads(r.read().decode("utf-8")).get("alive"))
+    except Exception:
+        return False
 
 
 def get_mode(default="work"):
@@ -1480,8 +1560,16 @@ class BlockSort(Node):
             color = self.detect_in_zone(target)
             if color is None:
                 return False
-            pose = self.detect(color)
+            # **구역 좌표를 near 로 넘긴다.** 안 넘기면 _detect_all 이 신뢰도 순으로
+            # 준 첫 번째를 집는다 — 같은 색이 여러 개면 엉뚱한 것을 집는다.
+            # 실측 2026-08-06: 1번 구역(454.8, 221.9) 명령에 23mm 짜리를 두고
+            # 240mm 떨어진 것을 집었다. detect_in_zone 이 거리로 색을 골라놓고도
+            # 위치를 버려서 그 판단이 여기서 무효가 됐다.
+            zx, zy = self.cfg["zones"][target][:2]
+            pose = self.detect(color, near=(zx, zy), max_dist=ZONE_PICK_MAX)
             if pose is None:
+                self.get_logger().error(
+                    f"{target}번 구역에서 {color} 를 다시 못 찾았습니다.")
                 return False
             self.get_logger().info(f"파지 목표 {[round(v, 1) for v in pose[:3]]}")
             if not self.pick(pose):
@@ -1526,10 +1614,12 @@ class BlockSort(Node):
         웹캠은 발행자 수로 충분하다. webcam_publisher 는 장치를 못 열면 아예
         종료되므로(sys.exit) 노드가 살아 있는 것이 곧 장치가 살아 있는 것이다.
         """
-        # 이 노드는 서비스 호출 때만 spin 하므로 콜백이 밀려 있을 수 있다.
-        # 여기서 잠깐 돌려 최신 상태를 받는다 — 팔이 멎어 있어 안전하다.
-        for _ in range(6):
-            rclpy.spin_once(self, timeout_sec=0.05)
+        # 여기서 spin 하지 않는다. rclpy.shutdown() 과 겹치면 무효 컨텍스트로
+        # 타이머를 만들려다 터진다 (실측 2026-08-06: RCLError, 컨텍스트 무효).
+        # camera_info 콜백은 검출 서비스 호출(spin_until_future_complete) 때
+        # 함께 처리되므로, 갱신 주기가 조금 늦을 뿐 판정은 유지된다.
+        if not rclpy.ok():
+            return
 
         cams = {}
         age = None if self._cam_info_t is None else time.time() - self._cam_info_t
@@ -1557,6 +1647,7 @@ class BlockSort(Node):
         # 이 프로세스가 떴다는 것 자체가 작업모드가 활성이라는 뜻이다.
         # 안 알리면 대시보드가 지난 실행의 control 상태를 그대로 들고 있어,
         # 첫 명령 전에 이미 '제어모드' 로 보인다.
+        ensure_tcp(self.get_logger())     # 파지 좌표가 전부 이 TCP 기준이다
         push_mode("work")
         self.push_hardware()               # TCP·카메라 상태를 한 번 올린다
         try:
@@ -1588,12 +1679,39 @@ class BlockSort(Node):
                 # 손동작 제어로 넘긴다. 여기서 그냥 계속 돌면 제어모드 중에
                 # 수어가 오인식됐을 때 팔이 멋대로 나가므로, 대시보드가 work 로
                 # 돌아왔다고 알려줄 때까지 명령을 받지 않는다.
+                if not control_ready():
+                    # 받아줄 상대가 없으면 아예 넘기지 않는다. 넘겼다가 멈추는
+                    # 것보다 그대로 작업모드에 있는 편이 낫다.
+                    self.get_logger().error(
+                        "제어 프로세스가 없어 모드를 바꾸지 않습니다 — "
+                        "hand_gesture_control.py --admin --robot 을 먼저 띄우세요.")
+                    push_debug("warn", "모드",
+                               "제어 프로세스가 없어 모드변경을 취소했습니다")
+                    if once:
+                        return False
+                    continue
                 self.get_logger().warn(
-                    "⇄ 모드변경 — 제어모드로 넘깁니다. "
-                    "hand_gesture_control.py 에서 양손을 3초 펴면 돌아옵니다.")
+                    "⇄ 모드변경 — 제어모드로 넘깁니다. 돌아오는 방법 셋: "
+                    "양손 3초 펴기 / 조종창 Q / 대시보드에서 작업모드 전환.")
                 push_mode("control")
                 self.go_home()
+                # 조종 쪽이 안 떠 있으면 아무도 work 로 되돌려주지 않는다.
+                # 그러면 여기서 영영 기다린다 — 실측 2026-08-06 에 그렇게 멈췄다.
+                # 시간을 정해두고, 지나면 스스로 작업모드로 돌아온다.
+                t0 = time.time()
                 while get_mode() == "control":
+                    # 조종 프로세스가 도중에 죽으면 기다릴 이유가 없다. 바로 복귀한다.
+                    if not control_ready():
+                        self.get_logger().warn(
+                            "제어 프로세스가 사라져 작업모드로 복귀합니다.")
+                        push_mode("work")
+                        break
+                    if time.time() - t0 > CONTROL_MAX_SEC:
+                        self.get_logger().warn(
+                            f"제어모드가 {CONTROL_MAX_SEC:.0f}초를 넘겨 스스로 복귀합니다 "
+                            "— hand_gesture_control.py 가 떠 있는지 확인하세요.")
+                        push_mode("work")
+                        break
                     time.sleep(0.5)
                 self.get_logger().warn("⇄ 작업모드로 복귀했습니다.")
                 if once:

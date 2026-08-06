@@ -64,6 +64,10 @@ GESTURE_CAM_TOPIC = os.environ.get("GESTURE_CAM_TOPIC", "/webcam/image_raw")
 # 같은 패턴(ADMIN_URL, "--admin" in sys.argv) 이다.
 ADMIN_URL = os.environ.get("SIGN_ADMIN_URL", "http://localhost:5000")
 USE_ADMIN = "--admin" in sys.argv
+# --robot 을 붙여야 실제 로봇이 움직인다. 기본은 화면만 — 손동작 인식을
+# 먼저 눈으로 확인하고 나서 팔을 붙이는 순서가 안전하다.
+# 속도·작업영역은 robot_teleop.py 의 환경변수로 조정한다.
+USE_ROBOT = "--robot" in sys.argv
 
 
 def push_mode(mode):
@@ -122,9 +126,30 @@ def start_frame_sender():
     threading.Thread(target=_frame_sender_loop, daemon=True).start()
 
 
+def ping_alive():
+    """이 프로세스가 살아 있다고 대시보드에 알린다.
+
+    block_sort 는 '모드변경' 을 받으면 여기로 제어권을 넘기고 대기에 들어간다.
+    그런데 이 프로세스가 없으면 아무도 work 로 되돌려주지 않아 작업모드가
+    멈춘다(2026-08-06 실측). 그래서 block_sort 가 넘기기 전에 이 신호를 본다.
+    대기 중에도 보내야 한다 — 대기 중인 것도 '받아줄 준비가 됐다' 는 뜻이다.
+    """
+    if not USE_ADMIN:
+        return
+    try:
+        req = urllib.request.Request(f"{ADMIN_URL}/api/control/alive",
+                                     data=b"{}",
+                                     headers={"Content-Type": "application/json"},
+                                     method="POST")
+        urllib.request.urlopen(req, timeout=1.0)
+    except Exception:
+        pass
+
+
 def wait_for_mode(target, poll_sec=0.5):
     """USE_ADMIN일 때, signbot_admin의 /api/mode 가 target 이 될 때까지 대기한다."""
     while True:
+        ping_alive()          # 대기 중에도 살아 있다고 알린다
         try:
             with urllib.request.urlopen(f"{ADMIN_URL}/api/mode", timeout=1.0) as r:
                 data = json.loads(r.read())
@@ -457,6 +482,12 @@ def run_session():
     """
     cap = open_cam()
     ok, frame = False, None
+    _last_ping = [0.0]
+    teleop = None
+    if USE_ROBOT:
+        from robot_teleop import RobotTeleop
+        teleop = RobotTeleop()
+        teleop.connect()
     # ROS 토픽은 구독 등록 직후 첫 메시지가 올 때까지 약간 지연될 수 있다 —
     # v4l2 는 보통 첫 시도에 바로 성공하지만 최대 5초까지 같이 기다려준다.
     for _ in range(50):
@@ -504,6 +535,17 @@ def run_session():
             fps = 0.9 * fps + 0.1 * (1.0 / dt)
 
         xy_hand, gesture_hand = P.process(frame, dt)
+        # 조종 중에도 살아 있다고 알린다. 2초에 한 번이면 충분하다
+        # (block_sort 는 10초 안의 신호를 살아있는 것으로 본다).
+        # 프레임 번호가 아니라 시각으로 재는 이유: 이 루프에는 tick 이 없다 —
+        # 있다고 가정하고 넣었다가 NameError 로 죽었다(2026-08-06).
+        if now - _last_ping[0] > 2.0:
+            _last_ping[0] = now
+            ping_alive()
+        if teleop is not None:
+            # 손이 하나라도 보이면 살아있는 것으로 본다 (데드맨).
+            seen = xy_hand is not None or gesture_hand is not None
+            teleop.update(P.pos, P.z, P.gripper > 0.5, seen)
         draw_roi(frame)
         draw_gauge(frame, P.z)
         if xy_hand is not None:
@@ -540,6 +582,10 @@ def run_session():
                     0.6, (0, 255, 255), 2)
         cv2.putText(frame, "Q quit  S smooth  [ ] gain  SPACE center  R reset  F full",
                     (12, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (200, 200, 200), 1)
+        if teleop is not None:
+            cv2.putText(frame, teleop.status(), (12, 56),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 255, 0) if teleop.enabled else (0, 0, 255), 2)
         cv2.putText(frame, f"{fps:.0f} fps", (w - 130, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (120, 255, 120), 2)
 
@@ -585,6 +631,8 @@ def run_session():
                                   cv2.WINDOW_FULLSCREEN if full else cv2.WINDOW_NORMAL)
 
     cap.release()
+    if teleop is not None:
+        teleop.close()
     cv2.destroyAllWindows()
     return True
 
