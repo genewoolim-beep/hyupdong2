@@ -40,6 +40,16 @@ robot_state = {
     "e_stop": False,
 }
 
+# block_sort.py --admin 이 POST /api/hardware 로 5초마다 갱신한다.
+# tcp.length_mm 는 설정값이 아니라 로봇이 지금 쓰고 있는 실측이다 — 같은 순간의
+# TCP 좌표와 플랜지 좌표를 읽어 그 차이를 잰다. 공구를 바꾸면 바로 반영된다.
+# cameras 는 각 영상 토픽에 발행자가 있는지다. USB 가 빠지면 False 로 떨어진다.
+hardware_state = {
+    "tcp": {"name": None, "length_mm": None, "offset_mm": None},
+    "cameras": {"realsense": False, "webcam": False, "detection": False},
+    "updated_at": None,
+}
+
 COLOR_HEX = {
     "빨강": "#DE3D3D",
     "주황": "#ED6B33",
@@ -159,6 +169,29 @@ def control():
 def api_status():
     """대시보드 상단 상태/통계 폴링용"""
     return jsonify({"robot": robot_state, "stats": get_stats()})
+
+
+@app.route("/api/hardware")
+def api_hardware():
+    """TCP · 카메라 연결 상태 폴링용"""
+    return jsonify(hardware_state)
+
+
+@app.route("/api/hardware", methods=["POST"])
+def api_hardware_update():
+    """block_sort.py --admin 이 5초마다 보고한다.
+
+    예: {"tcp": {"name": "rg2", "length_mm": 195.4, "offset_mm": [0,0,195.4]},
+         "cameras": {"realsense": true, "webcam": true, "detection": true}}
+    보낸 항목만 갱신한다 — 일부만 아는 쪽에서 보내도 나머지가 지워지지 않게.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    if isinstance(data.get("tcp"), dict):
+        hardware_state["tcp"].update(data["tcp"])
+    if isinstance(data.get("cameras"), dict):
+        hardware_state["cameras"].update(data["cameras"])
+    hardware_state["updated_at"] = datetime.now().strftime("%H:%M:%S")
+    return jsonify(hardware_state)
 
 
 @app.route("/api/logs")

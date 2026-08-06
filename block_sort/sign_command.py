@@ -220,6 +220,11 @@ COPY_GLOSS = {"똑같이": False, "좌우대칭": True}      # 값은 mirror 여
 # sign_demo.py 가 쓰는 규약과 같다.
 DELIMITER_GLOSS = os.environ.get("SIGN_DELIMITER", "박수")
 
+# 이 글로스가 문장에 들어 있으면 손동작 제어(hand_gesture_control.py)로 넘긴다.
+# 블록 명령이 아니라 인터페이스 전환이므로 steps 로 해석하지 않고 따로 본다.
+# sign_demo.py 와 같은 단어를 쓴다 — 다르면 데모와 로봇이 따로 논다.
+MODE_GLOSS = os.environ.get("SIGN_MODE_GLOSS", "모드변경")
+
 
 def _has_command(glosses):
     """지금까지 모은 것으로 명령 하나를 만들 수 있는가.

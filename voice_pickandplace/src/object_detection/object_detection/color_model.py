@@ -24,29 +24,21 @@ def _load_config(path):
     with open(path, encoding='utf-8') as f:
         spec = json.load(f)
 
-    default_hit = spec['frames']['min_hit_ratio']
-
     ranges = {}
-    hit_ratios = {}
     for name, entry in spec['colors'].items():
         bands = [
             ((r['h'][0], r['s'][0], r['v'][0]), (r['h'][1], r['s'][1], r['v'][1]))
             for r in entry['ranges']
         ]
         ranges[name] = bands
-        # 색마다 마스크가 흔들리는 정도가 다르므로 합의 기준을 따로 둘 수 있게 한다.
-        # 안 적으면 frames.min_hit_ratio 를 그대로 쓴다 — 기존 설정은 그대로 돌아간다.
-        hit = entry.get('min_hit_ratio', default_hit)
-        hit_ratios[name] = hit
         if entry.get('en'):
             # 같은 리스트를 가리키게 해서, 위 값만 고치면 영어 이름에도 그대로 반영되게 한다
             ranges[entry['en']] = bands
-            hit_ratios[entry['en']] = hit
 
-    return ranges, hit_ratios, spec['filters'], spec['frames']
+    return ranges, spec['filters'], spec['frames']
 
 
-COLOR_HSV_RANGES, COLOR_MIN_HIT_RATIO, _FILTERS, _FRAMES = _load_config(CONFIG_PATH)
+COLOR_HSV_RANGES, _FILTERS, _FRAMES = _load_config(CONFIG_PATH)
 
 # 색마다 다시 찍지 않고 이 시간 동안은 같은 촬영을 돌려 쓴다. 자세한 이유는
 # ColorModel._frames() 주석 참고.
@@ -61,7 +53,6 @@ MAX_ASPECT_RATIO = _FILTERS['max_aspect_ratio']
 
 FRAME_DURATION = _FRAMES['duration_sec']
 IOU_THRESHOLD = _FRAMES['iou_threshold']
-# 색이 COLOR_MIN_HIT_RATIO 에 없을 때만 쓰이는 기본값. 보통은 색깔별 값이 이긴다.
 MIN_HIT_RATIO = _FRAMES['min_hit_ratio']
 
 
@@ -214,15 +205,9 @@ class ColorModel:
             found, _ = detect_color_boxes(hsv, ranges, max_area, depth)
             items.extend(found)
 
-        min_hit = COLOR_MIN_HIT_RATIO.get(
-            key, COLOR_MIN_HIT_RATIO.get(target.strip(), MIN_HIT_RATIO)
-        )
-        out = consensus_boxes(items, len(frames), IOU_THRESHOLD, min_hit)
+        out = consensus_boxes(items, len(frames), IOU_THRESHOLD, MIN_HIT_RATIO)
         if not out:
-            print(
-                f"'{target}' was not seen consistently across {len(frames)} frames "
-                f"(min_hit_ratio={min_hit})."
-            )
+            print(f"'{target}' was not seen consistently across {len(frames)} frames.")
             self.last_angle = 0.0
             return []
         self.last_angle = out[0][1]

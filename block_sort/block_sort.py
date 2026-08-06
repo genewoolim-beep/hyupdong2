@@ -120,6 +120,11 @@ SVC_WAIT = float(os.environ.get("SVC_WAIT", 3.0))    # 서비스가 떠 있는�
 # 이동이 실제로 반영됐는지 판정하는 허용 오차(mm). movel() 주석 참고.
 MOVE_TOL = float(os.environ.get("MOVE_TOL", 8.0))
 
+# 카메라 프레임이 이 시간(초) 넘게 안 오면 끊긴 것으로 본다.
+# 30fps 라 정상이면 항상 1초 안쪽이다. USB 가 빠져도 노드는 살아 있으므로
+# 이 판정이 없으면 끊긴 걸 알 방법이 없다 (push_hardware 주석 참고).
+CAM_STALE_SEC = float(os.environ.get("CAM_STALE_SEC", 3.0))
+
 # 컨트롤러가 명령을 거부했을 때 다시 넣기 전에 기다리는 시간(초).
 # 재시도마다 이 값의 배수로 늘린다 — 거부는 큐가 비면 풀리므로 조금 기다리는
 # 것이 곧바로 다시 넣는 것보다 빨리 성공한다.
@@ -169,7 +174,8 @@ DR_init.__dsr__node = _dsr
 
 try:
     from DSR_ROBOT2 import (movej as _movej_raw, movel as _movel_raw,
-                            get_current_posx, mwait, get_robot_state, STATE_STANDBY)
+                            get_current_posx, mwait, get_robot_state, STATE_STANDBY,
+                            get_current_tool_flange_posx, get_tcp)
 except ImportError as e:
     sys.exit(f"DSR_ROBOT2 임포트 실패: {e}\n로봇 드라이버가 떠 있는지 확인하세요.")
 
@@ -198,6 +204,60 @@ def _admin_post(path, payload):
         except Exception:
             pass
     threading.Thread(target=_send, daemon=True).start()
+
+
+# ── 작업모드 ↔ 제어모드 ──────────────────────────────────────────────
+# 로봇을 움직이는 인터페이스가 둘이다. 이쪽(수어 블록 분류)이 '작업모드',
+# hand_gesture_control.py(손동작 조종)가 '제어모드'다. 둘이 동시에 로봇을
+# 잡으면 안 되므로 signbot_admin 의 /api/mode 를 한 곳의 진실로 삼는다.
+# sign_demo.py 가 먼저 이 규약을 썼는데 block_sort 에는 빠져 있었다.
+# 여기가 실제로 로봇을 움직이는 쪽이라, 빠져 있으면 제어모드 중에 수어가
+# 오인식됐을 때 팔이 멋대로 나간다.
+def push_mode(mode):
+    """지금 활성 인터페이스를 대시보드에 알린다. work | control"""
+    _admin_post("/api/mode", {"mode": mode})
+
+
+def tcp_info():
+    """지금 걸린 TCP 의 이름과 **플랜지에서의 거리**(mm).
+
+    컨트롤러는 TCP 이름만 돌려주고(GetCurrentTcp) 수치 오프셋을 주는 서비스가
+    없다. 대신 같은 순간의 TCP 좌표와 플랜지 좌표를 함께 읽어 그 차이를 재면
+    실제로 걸려 있는 값이 나온다 — 설정 파일이 아니라 로봇이 쓰고 있는 값이다.
+    """
+    try:
+        # 반환 형식이 다르다. get_current_posx 는 (posx, 솔루션공간) 튜플이라
+        # [0] 이 필요하고, get_current_tool_flange_posx 는 posx 를 바로 준다.
+        # [0] 을 붙이면 스칼라를 집어 'invalid index to scalar variable' 이 난다.
+        tcp = get_current_posx()[0]
+        flange = get_current_tool_flange_posx()
+        d = [tcp[i] - flange[i] for i in range(3)]
+        length = float(np.linalg.norm(d))
+        try:
+            name = get_tcp()
+        except Exception:
+            name = None
+        # error 를 항상 실어 보낸다. 대시보드가 부분 갱신(update)이라, 성공했을 때
+        # 이 키를 빼면 지난 실패의 메시지가 그대로 남아 붙어 있는다.
+        return {"name": name if isinstance(name, str) else None,
+                "length_mm": round(length, 1),
+                "offset_mm": [round(v, 1) for v in d],
+                "error": None}
+    except Exception as e:
+        return {"name": None, "length_mm": None, "offset_mm": None, "error": str(e)}
+
+
+def get_mode(default="work"):
+    """대시보드가 아는 현재 모드. --admin 이 아니거나 못 읽으면 default."""
+    if not USE_ADMIN:
+        return default
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{ADMIN_URL}/api/mode", timeout=1.0) as r:
+            return json.loads(r.read().decode("utf-8")).get("mode", default)
+    except Exception:
+        return default
 
 
 # 대시보드(app.py 의 COLOR_HEX)는 짧은 이름을 쓰고, 검출 쪽은 color_ranges.json 의
@@ -395,6 +455,13 @@ class BlockSort(Node):
         self.lift = self.cfg.get("lift_height", 150)
         self.cli = self.create_client(SrvDepthPosition, "/get_3d_position")
         self.req = SrvDepthPosition.Request()
+        # RealSense 살아있는지 판정용. 영상 대신 camera_info 를 받아 마지막 시각만
+        # 기록한다 (수백 바이트). 이유는 push_hardware() 주석 참고.
+        self._cam_info_t = None
+        from sensor_msgs.msg import CameraInfo
+        self.create_subscription(
+            CameraInfo, "/camera/camera/color/camera_info",
+            lambda _m: setattr(self, "_cam_info_t", time.time()), 1)
         self.gripper2cam = np.load(HANDEYE)
         # 블록도 구역과 같은 판 위에 있으므로 파지 높이는 구역 z 와 같다.
         zs = [p[2] for p in self.cfg["zones"].values()]
@@ -1359,6 +1426,35 @@ class BlockSort(Node):
             push_zone("robot", zone, target)
         return ok
 
+    def push_hardware(self):
+        """TCP 와 카메라 연결 상태를 대시보드로 보낸다.
+
+        RealSense 는 **프레임이 실제로 오는지** 로 판단한다. 발행자 수로 보면
+        안 된다 — 실측 2026-08-06: USB 가 빠져도 realsense2_camera_node 는 살아
+        남아 발행자가 계속 1 로 잡혔고, 대시보드가 정상이라고 거짓 보고했다.
+        정작 이 표시가 필요한 상황을 못 잡은 것이다.
+        영상 대신 같은 노드가 같은 주기로 내보내는 camera_info 를 본다 —
+        수백 바이트라 구독해도 대역폭에 부담이 없다.
+
+        웹캠은 발행자 수로 충분하다. webcam_publisher 는 장치를 못 열면 아예
+        종료되므로(sys.exit) 노드가 살아 있는 것이 곧 장치가 살아 있는 것이다.
+        """
+        # 이 노드는 서비스 호출 때만 spin 하므로 콜백이 밀려 있을 수 있다.
+        # 여기서 잠깐 돌려 최신 상태를 받는다 — 팔이 멎어 있어 안전하다.
+        for _ in range(6):
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+        cams = {}
+        age = None if self._cam_info_t is None else time.time() - self._cam_info_t
+        cams["realsense"] = age is not None and age < CAM_STALE_SEC
+        try:
+            cams["webcam"] = self.count_publishers("/webcam/image_raw/compressed") > 0
+        except Exception:
+            cams["webcam"] = False
+        # 검출은 카메라가 살아 있어도 노드가 죽으면 못 쓴다. 따로 본다.
+        cams["detection"] = bool(self.cli.service_is_ready())
+        _admin_post("/api/hardware", {"tcp": tcp_info(), "cameras": cams})
+
     def run_sign(self, once=False):
         """수어 한 문장 → LLM 해석 → 구역 배치. 기본은 반복이다.
 
@@ -1371,6 +1467,11 @@ class BlockSort(Node):
         rec = sc.make_recognizer()
         zones = sorted(self.cfg["zones"])
         colors = ", ".join(sorted(sc.GLOSS_TO_COLOR))
+        # 이 프로세스가 떴다는 것 자체가 작업모드가 활성이라는 뜻이다.
+        # 안 알리면 대시보드가 지난 실행의 control 상태를 그대로 들고 있어,
+        # 첫 명령 전에 이미 '제어모드' 로 보인다.
+        push_mode("work")
+        self.push_hardware()               # TCP·카메라 상태를 한 번 올린다
         try:
             return self._sign_loop(sc, rec, zones, colors, once)
         finally:
@@ -1378,6 +1479,11 @@ class BlockSort(Node):
 
     def _sign_loop(self, sc, rec, zones, colors, once):
         while True:
+            # 명령을 기다리기 직전에 갱신한다. create_timer 로는 안 된다 —
+            # 이 루프는 인식·모션에 블로킹되어 있어 실행기가 안 돌고, 그러면
+            # 타이머 콜백이 영영 안 불린다. 여기라면 팔이 멎어 있어 DSR 서비스
+            # 호출도 안전하다. 대시보드를 재시작해도 다음 명령 때 다시 채워진다.
+            self.push_hardware()
             self.get_logger().info(
                 f"수어로 명령하세요 — 예: 빨강 → {zones[0]}번구역  "
                 f"(색: {colors} / 구역: {zones})")
@@ -1391,6 +1497,21 @@ class BlockSort(Node):
                 return False
             glosses, steps, how = got
             text = " ".join(glosses)
+            if sc.MODE_GLOSS in glosses:
+                # 손동작 제어로 넘긴다. 여기서 그냥 계속 돌면 제어모드 중에
+                # 수어가 오인식됐을 때 팔이 멋대로 나가므로, 대시보드가 work 로
+                # 돌아왔다고 알려줄 때까지 명령을 받지 않는다.
+                self.get_logger().warn(
+                    "⇄ 모드변경 — 제어모드로 넘깁니다. "
+                    "hand_gesture_control.py 에서 양손을 3초 펴면 돌아옵니다.")
+                push_mode("control")
+                self.go_home()
+                while get_mode() == "control":
+                    time.sleep(0.5)
+                self.get_logger().warn("⇄ 작업모드로 복귀했습니다.")
+                if once:
+                    return True
+                continue
             if not steps:
                 self.get_logger().warn(f"'{text}' 를 해석하지 못했습니다 — 다시 하세요.")
                 if once:

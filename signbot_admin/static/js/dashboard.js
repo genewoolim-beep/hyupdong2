@@ -27,6 +27,37 @@
     }
   }
 
+  // TCP 길이와 카메라 연결 상태. block_sort.py --admin 이 5초마다 보고한다.
+  // 보고하는 프로세스가 없으면 '미보고' 로 남긴다 — 거짓으로 '정상' 이라고
+  // 쓰는 것보다 낫다. 실제로 오늘 RealSense USB 가 빠진 채로 돌아간 적이 있다.
+  async function fetchHardware() {
+    try {
+      const res = await fetch("/api/hardware");
+      if (!res.ok) return;
+      const hw = await res.json();
+
+      const tcpEl = document.getElementById("statTcp");
+      if (tcpEl) {
+        const t = hw.tcp || {};
+        tcpEl.textContent = (t.length_mm === null || t.length_mm === undefined)
+          ? "미보고"
+          : Number(t.length_mm).toFixed(1) + " mm" + (t.name ? " · " + t.name : "");
+      }
+
+      const camEl = document.getElementById("statCams");
+      if (camEl) {
+        const c = hw.cameras || {};
+        const label = { realsense: "RealSense", webcam: "웹캠", detection: "검출" };
+        const parts = Object.keys(label).map(function (k) {
+          return (c[k] ? "🟢 " : "🔴 ") + label[k];
+        });
+        camEl.textContent = hw.updated_at ? parts.join("  ") : "미보고";
+      }
+    } catch (e) {
+      console.error("hardware polling failed", e);
+    }
+  }
+
   function updateStats(stats) {
     const map = {
       statConnectedRobots: stats.connected_robots + "대",
@@ -275,6 +306,8 @@
     fetchSentence();
     fetchDebugLog();
     fetchMode();
+    fetchHardware();
+    setInterval(fetchHardware, POLL_INTERVAL_MS);
     setInterval(fetchStatus, POLL_INTERVAL_MS);
     setInterval(fetchLogs, POLL_INTERVAL_MS);
     setInterval(fetchZones, POLL_INTERVAL_MS);
