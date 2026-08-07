@@ -110,3 +110,151 @@ def best_axis(target_xy, axis_deg, neighbors, finger_t=FINGER_T, **kw):
     if g90 > g0:
         return 90.0, g90, g0
     return 0.0, g0, g0
+
+
+# ── 사방이 막혔을 때: 이웃 하나를 옆으로 치운다 ──────────────────────
+# best_axis 로도 못 풀리면(두 축 다 좁으면) 손목을 돌려서 해결할 방법이 없다 —
+# 자리 자체가 없는 것이다. 이땐 막고 있는 이웃 블록 하나를 옮겨 자리를 만든다.
+#
+# 옮기는 방향은 target에서 그 이웃으로 이어지는 축 방향, 그대로 더 밀어내는
+# 쪽이다(옆으로 레인을 벗어나게 미는 방법도 있지만, 축을 따라 미는 쪽이 계산이
+# 한 가지뿐이라 더 예측 가능하다 — 그리고 어차피 최소 이동량만 계산하므로
+# 옮기는 거리 자체는 작다). 옮기는 양은 "그 축의 틈을 문턱보다 살짝 더
+# 벌리는 데 필요한 최소 거리" 다 — 필요 이상으로 멀리 보내지 않는다.
+RELOCATE_MARGIN = 5.0    # 문턱에 딱 맞추면 손 떨림 등으로 다시 걸릴 수 있어 여유를 더 준다
+
+
+def blocking_neighbor(target_xy, axis_deg, neighbors, block_mm=BLOCK_MM,
+                      lane_half=LANE_HALF):
+    """approach_gap 과 같은 판정으로, 가장 좁은 틈을 만든 이웃의 좌표 자체를 돌려준다.
+
+    approach_gap 은 가장 좁은 틈의 **크기**만 돌려주고 누가 그 틈을 만들었는지는
+    버린다. 이웃을 실제로 옮기려면 어느 이웃인지가 필요해서 따로 둔다 — 판정
+    로직 자체는 approach_gap 과 반드시 같아야 하므로(안 그러면 "막혔다고 판단한
+    것" 과 "옮기려는 것" 이 다른 블록을 가리킬 수 있다) 여기서 다시 구현한다.
+    막는 이웃이 없으면 None.
+    """
+    import numpy as np
+    r = np.radians(float(axis_deg))
+    ax = np.array([np.cos(r), np.sin(r)])
+    perp = np.array([-ax[1], ax[0]])
+    best_gap, best_xy = float("inf"), None
+    for nb in neighbors:
+        d = np.array([float(nb[0]) - target_xy[0], float(nb[1]) - target_xy[1]])
+        if abs(float(perp @ d)) >= lane_half:
+            continue                               # 옆으로 비켜 있다 — 방해 아님
+        gap = abs(float(ax @ d)) - block_mm
+        if gap < best_gap:
+            best_gap, best_xy = gap, (float(nb[0]), float(nb[1]))
+    return best_xy
+
+
+def relocate_step(target_xy, blocker_xy, axis_deg, finger_t=FINGER_T,
+                  block_mm=BLOCK_MM, margin=RELOCATE_MARGIN):
+    """blocker_xy 를 target_xy 로부터 axis_deg 축 방향으로 밀어낼 목적지.
+
+    이미 틈이 충분하면(옮길 필요가 없으면) None. 다른 블록과 겹치는지는 여기서
+    보지 않는다 — 순수 기하 함수라 판 위에 뭐가 더 있는지 모른다. 그건 부르는
+    쪽이 비전(neighbors_xy)으로 확인한다.
+    """
+    import numpy as np
+    r = np.radians(float(axis_deg))
+    ax = np.array([np.cos(r), np.sin(r)])
+    d = np.array([blocker_xy[0] - target_xy[0], blocker_xy[1] - target_xy[1]])
+    along = float(ax @ d)                          # 부호 있음 — target 기준 어느 쪽인지
+    need = (block_mm + finger_t + margin) - abs(along)
+    if need <= 0:
+        return None                                # 이미 충분하다
+    sign = 1.0 if along >= 0 else -1.0
+    dest = np.array(blocker_xy) + sign * need * ax
+    return (float(dest[0]), float(dest[1]))
+
+
+# ── 여러 개를 옮기는 계획(복제)에서: 막는 블록이 그 계획에도 있으면 먼저 처리 ──
+# copy_human() 같은 계획은 "인간구역 배치를 로봇구역에 그대로 만든다" 처럼
+# 여러 색을 순서대로 옮긴다. 그런데 뒤 순번 색이 앞 순번 색을 막고 있으면,
+# 앞 색을 집으려다 relocate_blocker 가 뒤 색을 **임시 자리로 잠깐 치웠다가**
+# 나중에 그 계획 차례가 왔을 때 제 목적지로 또 옮기게 된다 — 두 번 움직이는
+# 낭비다. 뒤 색이 어차피 이 계획에서 옮겨야 할 색이라면, 그 자리에서 곧장
+# **제 목적지로** 보내는 편이 한 번의 이동으로 끝난다. 그러려면 순서를
+# 먼저 바꿔야 한다 — 이 판단은 patrol()로 이미 모아 둔 좌표만으로 되므로
+# 로봇을 다시 움직이지 않고 계획을 세우는 시점에 할 수 있다.
+def _blocking_color(color, xy, axis_deg, all_pts, finger_t=FINGER_T):
+    """xy(color)가 다른 블록들 사이에서 두 축 다 막혀 있으면 막는 블록의 색.
+
+    all_pts 는 [(x, y, 색), ...] — 판 위 모든 프리 블록(이 색의 다른 개체
+    포함). 자기 자신(좌표가 거의 같은 같은 색 항목)은 제외하고 본다.
+    안 막혀 있거나 막는 이웃의 색을 모르면 None.
+    """
+    others = [(x, y) for x, y, c in all_pts
+             if not (c == color and abs(x - xy[0]) < 1.0 and abs(y - xy[1]) < 1.0)]
+    turn, gap, _gap0 = best_axis(xy, axis_deg, others, finger_t=finger_t)
+    if gap >= finger_t:
+        return None                                # 안 막혔다
+    bxy = blocking_neighbor(xy, axis_deg + turn, others)
+    if bxy is None:
+        return None
+    return next((c for x, y, c in all_pts
+                if abs(x - bxy[0]) < 1.0 and abs(y - bxy[1]) < 1.0), None)
+
+
+def reorder_for_conflicts(plan, positions, finger_t=FINGER_T):
+    """plan을 막힘 관계를 반영해 재정렬한다 — 막는 색을 먼저 오게 한다.
+
+    plan       [(hz_i, dst, color, angle_deg), ...] — copy_human()의 계획.
+               색이 세 번째, 손목 각도(축 방향 판단 기준)가 네 번째 자리다.
+    positions  {색: [(x, y), ...]} — patrol()로 이미 모아 둔 프리구역 좌표.
+               plan에 없는 색이 섞여 있어도 된다(막는 쪽 판정에만 쓰인다 —
+               plan에 없는 색은 순서를 조정할 대상이 아니므로 자연히 걸러진다).
+
+    각 항목이 두 축 다 막혀 있고 그 막는 이웃이 **plan 안의 다른 색**이면,
+    그 색의 항목을 이 항목보다 앞으로 옮긴다. 같은 색이 plan에 여럿이면
+    (인간구역 두 칸이 같은 색) 순서 판단은 그 색의 대표 좌표(첫 개체) 하나로
+    하되, 실제 순서는 항목 단위로(원래 상대 순서를 유지하며) 옮긴다.
+
+    서로가 서로를 막는 순환 의존이면 풀 수 없다 — 그 경우 원래 순서를
+    유지한다(무리하게 순서를 만들지 않는다. relocate_blocker 의 임시 대피가
+    그런 경우의 안전망으로 남아 있다).
+    """
+    all_pts = [(x, y, c) for c, pts in positions.items() for x, y in pts]
+    plan_colors = {t[2] for t in plan}
+
+    deps = {}                          # color -> plan 안에서 그 색을 막는 색들
+    seen_color = set()
+    for _hz_i, _dst, color, ang in plan:
+        if color in seen_color:        # 같은 색은 대표 좌표 하나로 한 번만 판단
+            continue
+        seen_color.add(color)
+        pts = positions.get(color) or []
+        if not pts:
+            continue
+        blocker = _blocking_color(color, pts[0], ang, all_pts, finger_t=finger_t)
+        if blocker and blocker in plan_colors and blocker != color:
+            deps[color] = blocker
+
+    if not deps:
+        return list(plan)
+
+    # 색 단위로 위상정렬한다 — 막는 색(선행)이 먼저 오도록. 안정 정렬:
+    # 매 단계에서 아직 선행이 안 끝난 것은 건너뛰고, 끝난 것부터 확정한다.
+    # 진행이 안 되면(순환 의존) 남은 것은 원래 순서 그대로 이어붙인다.
+    color_order, placed = [], set()
+    remaining = list(dict.fromkeys(t[2] for t in plan))   # 등장 순서, 중복 제거
+    while remaining:
+        progressed = False
+        for c in list(remaining):
+            need = deps.get(c)
+            if need is not None and need not in placed and need in remaining:
+                continue                    # 선행 색이 아직 안 끝났다 — 나중에
+            color_order.append(c)
+            placed.add(c)
+            remaining.remove(c)
+            progressed = True
+        if not progressed:                  # 순환 의존 — 남은 건 원래 순서로
+            color_order += remaining
+            break
+
+    by_color = {}
+    for t in plan:
+        by_color.setdefault(t[2], []).append(t)
+    return [t for c in color_order for t in by_color[c]]

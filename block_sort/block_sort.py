@@ -45,7 +45,9 @@ from od_msg.srv import SrvDepthPosition
 # 순간 DSR 에 붙어서 로봇 없이는 시험할 수 없기 때문이다 — 책상에서 확인할 수
 # 있는 계산은 block_geom 에 모아 test_copy_angle.py 가 그대로 시험한다.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from block_geom import best_axis, fold90, rotate_tool, tool_yaw   # noqa: E402
+from block_geom import (BLOCK_MM, best_axis, blocking_neighbor, fold90,
+                        relocate_step, reorder_for_conflicts, rotate_tool,
+                        tool_yaw)   # noqa: E402
 
 ROBOT_ID, ROBOT_MODEL = "dsr01", "m0609"
 
@@ -183,6 +185,22 @@ FINGER_GAP_MIN = float(os.environ.get("FINGER_GAP_MIN", 27.0))
 PICK_WHEN_TIGHT = os.environ.get("PICK_WHEN_TIGHT", "0") != "0"
 # 0 이면 이 기능을 끈다(예전처럼 검출 각도대로만 물린다).
 AVOID_NEIGHBORS = os.environ.get("AVOID_NEIGHBORS", "1") != "0"
+
+# 두 축 다 좁아 손목을 돌려도 못 풀 때, 막고 있는 이웃 블록 하나를 옆으로
+# 옮겨 자리를 만들지 여부. **기본은 꺼져 있다** — 옆 블록 회피(손목 회전)와
+# 달리 이건 원래 시키지 않은 블록을 새로 집어서 옮기는 동작이라 실기 검증
+# 전에는 꺼 두는 편이 안전하다. 1 로 켠다.
+RELOCATE_BLOCKERS = os.environ.get("RELOCATE_BLOCKERS", "0") != "0"
+# 원래 목표 하나를 위해 이웃을 몇 개까지 옮겨볼지. 옮겨도 다른 이웃이 같은
+# 축을 또 막고 있을 수 있어 한 번으로 안 끝날 수 있다 — 그렇다고 무한정
+# 옮기면 판 전체를 재배치하게 되므로 상한을 둔다.
+RELOCATE_MAX_TRIES = int(os.environ.get("RELOCATE_MAX_TRIES", 2))
+
+# 복제(copy_human) 계획에서, 뒤 순번 색이 앞 순번 색을 막고 있으면 순서를
+# 앞당길지 여부. 새 로봇 동작을 추가하는 게 아니라 **이미 하기로 한 이동들의
+# 순서만 바꾸는 것**이라(relocate_blocker와 달리 위험이 새로 생기지 않는다)
+# 기본을 켜 둔다. 0 이면 끈다(예전처럼 인간구역 번호 순서 그대로).
+REORDER_FOR_BLOCKING = os.environ.get("REORDER_FOR_BLOCKING", "1") != "0"
 
 # 순회에서 봐 둔 자리와 다시 봤을 때의 자리가 이보다 벌어지면 다른 블록으로 본다.
 # 실측 2026-08-04: 한계가 없어 250mm 떨어진 같은 색을 집으러 갔다.
@@ -1040,6 +1058,23 @@ class BlockSort(Node):
                 f"프리구역에 부족한 색: {', '.join(short)} — 그 칸은 건너뜁니다")
             push_stock(short, "해당 칸은 건너뜁니다")
 
+        # 뒤 순번 색이 앞 순번 색을 막고 있으면 앞당긴다. 어차피 이 계획에서
+        # 옮겨야 할 색이면, relocate_blocker 로 임시 자리에 잠깐 치웠다가
+        # 나중에 제 차례에 또 옮기는(두 번 움직이는) 대신 그 자리에서 곧장
+        # 제 목적지로 보내는 편이 한 번으로 끝난다. patrol()로 이미 모아 둔
+        # 좌표만으로 판단하므로 로봇을 더 움직이지 않는다 — block_geom.py 에서
+        # 로봇 없이 검증된다(test_reorder.py).
+        if REORDER_FOR_BLOCKING:
+            positions = {c: [(d["pose"][0], d["pose"][1]) for d in dets]
+                        for c, dets in stock.items()}
+            reordered = reorder_for_conflicts(plan, positions)
+            if reordered != plan:
+                self.get_logger().warn(
+                    "옆 블록이 계획에 있는 다른 색이라 순서를 바꿉니다: "
+                    + " → ".join(f"{c}(로봇{d}번)" for _h, d, c, _a in reordered))
+                push_debug("info", "복제", "막는 색을 먼저 처리하도록 순서 변경")
+                plan = reordered
+
         ok = True
         placed = {}
         for hz_i, dst, color, ang in plan:
@@ -1332,7 +1367,7 @@ class BlockSort(Node):
                     out.append((p[0], p[1], color))
         return out
 
-    def aim_between_neighbors(self, pose):
+    def aim_between_neighbors(self, pose, allow_relocate=True, _tries=0):
         """손가락이 내려갈 방향에 블록이 있으면 **손목을 90° 돌린다.**
 
         그리퍼는 한 축의 양쪽에서 손가락이 내려와 안쪽으로 닫힌다. 그 축에 다른
@@ -1341,8 +1376,15 @@ class BlockSort(Node):
         물는 면이 옆면에서 옆면으로 바뀔 뿐이다. 그래서 여유가 넓은 쪽을 고르면
         잃는 것이 없다.
 
-        두 축 다 좁으면 **None 을 돌려 파지를 접는다** — 칠 것을 알면서 내려가는
-        것보다 멈추고 사람에게 치우라고 하는 편이 낫다(PICK_WHEN_TIGHT 로 바꿀 수 있다).
+        두 축 다 좁으면, RELOCATE_BLOCKERS 가 켜져 있고 allow_relocate 이면
+        막고 있는 이웃 하나를 옆으로 옮기고 다시 판단한다(relocate_blocker).
+        그래도 안 풀리면(또는 꺼져 있으면) **None 을 돌려 파지를 접는다** — 칠 것을
+        알면서 내려가는 것보다 멈추고 사람에게 치우라고 하는 편이 낫다
+        (PICK_WHEN_TIGHT 로 바꿀 수 있다).
+
+        allow_relocate=False 는 relocate_blocker 가 이웃 블록 **자신**을 집을 때
+        쓴다 — 그 이웃을 집으면서 또 다른 이웃을 옮기기 시작하면 판 전체가
+        연쇄적으로 재배치될 수 있어, 한 단계로 막는다.
 
         판단은 block_geom.best_axis 가 한다(로봇 없이 시험된다 — test_avoid.py).
         여기서는 **좌표를 모아 주고, 고른 결과를 자세와 last_rot 에 반영**한다.
@@ -1380,6 +1422,17 @@ class BlockSort(Node):
             self.get_logger().info(f"옆 블록 있음, 틈 {mm(gap)} — 그대로 물립니다 [{near}]")
         if gap < FINGER_GAP_MIN:
             # 돌려도 안 풀린다 — 두 축 다 좁다.
+            if RELOCATE_BLOCKERS and allow_relocate and _tries < RELOCATE_MAX_TRIES:
+                # relocate_blocker 는 안에서 (치울) 이웃을 스스로 detect()/pick() 한다 —
+                # 그 둘 다 self.last_rot 을 **그 이웃의** 각도로 덮어쓴다. 여기서
+                # 저장해 뒀다가 되돌리지 않으면, 되돌아와 재귀할 때 원래 target 의
+                # 회전(turn)이 아니라 방금 치운 이웃의 각도 위에 다시 더해져
+                # grasp_offset() 이 엉뚱한 방향으로 보정된다.
+                saved_last_rot = self.last_rot
+                moved = self.relocate_blocker((pose[0], pose[1]), axis + turn, nb)
+                self.last_rot = saved_last_rot
+                if moved:
+                    return self.aim_between_neighbors(pose, allow_relocate, _tries + 1)
             self.get_logger().error(
                 f"양쪽 다 좁습니다 (틈 {mm(gap)} < 손가락 {FINGER_GAP_MIN:.0f}mm) — "
                 + ("경고만 하고 그대로 집습니다 (PICK_WHEN_TIGHT=1)"
@@ -1392,13 +1445,68 @@ class BlockSort(Node):
                 return None            # 부르는 쪽(pick)이 파지를 접는다
         return pose
 
-    def pick(self, pose):
-        """접근 → 하강 → 파지 → 확인. 성공하면 True."""
+    def relocate_blocker(self, target_xy, axis_deg, neighbors):
+        """axis_deg 축을 막고 있는 이웃 블록 하나를 옆으로 옮겨 자리를 만든다.
+
+        1. 어느 이웃이 막는지 block_geom.blocking_neighbor 로 찾는다 — 판정
+           로직이 approach_gap 과 같아야 "막혔다고 본 것" 과 "옮기는 것" 이
+           같은 블록을 가리킨다.
+        2. block_geom.relocate_step 으로 목적지를 계산한다(순수 기하 — 필요한
+           최소 거리만 옮긴다).
+        3. 목적지가 **다른** 블록과 안 겹치는지 비전으로 확인한다. 겹치면
+           치울 자리도 없다는 뜻이라 포기한다(억지로 밀어 넣지 않는다).
+        4. 그 블록을 집어 목적지에 그대로 내려놓는다(자세는 원래 것 그대로 —
+           정렬을 새로 맞출 이유가 없다). 집을 때 allow_relocate=False 로 —
+           이 블록 자신의 이웃까지 옮기기 시작하면 연쇄가 끝없이 번질 수 있다.
+
+        성공하면 True. 실패해도 예외를 올리지 않는다 — 부르는 쪽이 원래
+        하던 대로(경고 후 파지 포기) 계속하면 된다.
+        """
+        bxy = blocking_neighbor(target_xy, axis_deg, [(x, y) for x, y, _c in neighbors])
+        if bxy is None:
+            return False
+        color = next((c for x, y, c in neighbors
+                     if np.hypot(x - bxy[0], y - bxy[1]) < 1.0), None)
+        if color is None:
+            return False
+        dest = relocate_step(target_xy, bxy, axis_deg)
+        if dest is None:
+            return False
+        blocked = [n for n in self.neighbors_xy(dest, radius=BLOCK_MM + FINGER_GAP_MIN)
+                  if np.hypot(n[0] - bxy[0], n[1] - bxy[1]) > 5.0]
+        if blocked:
+            self.get_logger().warn(
+                f"{color}({bxy[0]:.0f},{bxy[1]:.0f})를 옮길 자리"
+                f"({dest[0]:.0f},{dest[1]:.0f})도 다른 블록에 막혀 포기합니다")
+            return False
+        self.get_logger().warn(
+            f"{color}({bxy[0]:.0f},{bxy[1]:.0f})가 막고 있어 "
+            f"({dest[0]:.0f},{dest[1]:.0f})로 치웁니다")
+        push_debug("warn", "파지",
+                   f"이웃 {color} 치우는 중 → ({dest[0]:.0f},{dest[1]:.0f})")
+        pose = self.detect(color, near=bxy, max_dist=CACHE_TOLERANCE)
+        if pose is None:
+            self.get_logger().error(f"치울 {color} 를 다시 못 찾았습니다")
+            return False
+        if not self.pick(pose, allow_relocate=False):
+            self.get_logger().error(f"{color} 를 집지 못해 치우기를 포기합니다")
+            return False
+        dest_pose = list(pose)
+        dest_pose[0], dest_pose[1] = dest
+        self.place_at(dest_pose, taught=False)
+        return True
+
+    def pick(self, pose, allow_relocate=True):
+        """접근 → 하강 → 파지 → 확인. 성공하면 True.
+
+        allow_relocate=False 는 relocate_blocker 가 치울 이웃 자신을 집을 때
+        쓴다 — 연쇄적으로 또 다른 이웃을 옮기기 시작하지 않게 막는다.
+        """
         pose = list(pose)
         # 손목 방향을 먼저 정한다 — 파지 보정이 손목 각도에 딸려 있어서,
         # 보정을 더한 뒤에 돌리면 보정이 틀린 방향으로 남는다.
         # None 이면 옆 블록에 막혀 내려갈 자리가 없다는 뜻이다.
-        pose = self.aim_between_neighbors(pose)
+        pose = self.aim_between_neighbors(pose, allow_relocate=allow_relocate)
         if pose is None:
             return False
         g = self.grasp_offset()
