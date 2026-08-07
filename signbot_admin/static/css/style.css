@@ -120,15 +120,18 @@ body {
   flex-direction: column;
   gap: 16px;
 }
-/* 조종 화면은 **영상 모양을 그대로 따라간다.** 16:9 로 고정하면 세로로 세운
-   화면(GESTURE_ROTATE=90)이 가운데 얇은 띠로 쪼그라든다. aspect-ratio 를 풀고
-   높이를 영상에 맡기면 가로·세로 어느 쪽이 와도 여백 없이 꽉 찬다 —
-   회전 설정을 CSS 가 알 필요가 없어진다. */
+/* 조종 화면은 **영상 모양을 그대로 따라간다 — 검은 여백을 만들지 않는다.**
+   틀을 16:9 로 고정하면 세로로 세운 화면(GESTURE_ROTATE=90)이 가운데 얇은
+   띠가 되고 위아래가 검게 남는다. 반대로 영상을 잘라 틀에 맞추면 시야를 잃는다.
+   그래서 **틀이 영상을 따라간다**: 폭만 정하고 높이는 영상 비율이 정한다.
+   max-height 를 걸면 안 된다 — 그 순간 다시 여백이 생긴다(높이는 잘리고 폭은
+   그대로라 contain 이 letterbox 를 만든다).
+   이러면 CSS 가 회전·자르기 설정을 알 필요가 없다. 가로가 와도 세로가 와도 맞는다. */
 .gesture-cam-panel .video-feed {
-  max-width: 360px; width: 100%; margin: 0 auto;
-  aspect-ratio: auto; max-height: 62vh;
+  max-width: 300px; width: 100%; margin: 0 auto;
+  aspect-ratio: auto; min-height: 120px;
 }
-.gesture-cam-panel .video-feed img { height: auto; max-height: 62vh; }
+.gesture-cam-panel .video-feed img { width: 100%; height: auto; display: block; }
 
 /* ---------- Mode banner (제어 화면) ---------- */
 .mode-banner {
