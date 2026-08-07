@@ -19,7 +19,7 @@
     <div class="panel-title">로봇 시점 · RealSense</div>
     <div class="video-feed">
       <img id="realsenseVideoFeed" src="{{ url_for('realsense_video_feed') }}" alt="RealSense 화면" onerror="this.style.display='none'; document.getElementById('realsensePlaceholder').style.display='block';">
-      <span id="realsensePlaceholder" class="video-placeholder-text">로봇 RealSense 중계가 아직 연결되지 않았습니다</span>
+      <span id="realsensePlaceholder" class="video-placeholder-text" style="display: none">로봇 RealSense 중계가 아직 연결되지 않았습니다</span>
     </div>
     <p class="hint-text">실제로 로봇을 조종하려면 로봇이 보는 화면을 봐야 합니다 — realsense_bridge.py가 로봇 쪽 RealSense 영상을 여기로 보냅니다.</p>
   </div>
@@ -29,7 +29,7 @@
       <div class="panel-title">조종 화면 (xy · z · 그리퍼)</div>
       <div class="video-feed">
         <img id="controlVideoFeed" src="{{ url_for('control_video_feed') }}" alt="hand_gesture_control.py 화면" onerror="this.style.display='none'; document.getElementById('controlVideoPlaceholder').style.display='block';">
-        <span id="controlVideoPlaceholder" class="video-placeholder-text">hand_gesture_control.py --admin 이 아직 화면을 보내지 않았습니다</span>
+        <span id="controlVideoPlaceholder" class="video-placeholder-text" style="display: none">hand_gesture_control.py --admin 이 아직 화면을 보내지 않았습니다</span>
       </div>
     </div>
 

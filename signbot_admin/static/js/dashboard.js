@@ -299,7 +299,35 @@
       });
   }
 
+  // 카메라 안내문("아직 연결되지 않았습니다")은 **영상이 없을 때만** 보여준다.
+  //
+  // 전에는 기본이 '보임' 이라 영상이 잘 와도 그 글자가 <img> 옆에 나란히 놓여
+  // 여백을 만들었다. onerror 로만 켜도록 두면 안 되는 이유: MJPEG 연결은
+  // 열려 있고 프레임만 안 오는 상태에서는 onerror 가 아예 안 난다
+  // (app.py 의 gen_*_video_frames 는 프레임이 없으면 아무것도 내보내지 않는다).
+  // 그래서 naturalWidth 로 **실제로 그려진 게 있는지**를 본다 — 첫 프레임이
+  // 도착하면 0 보다 커진다.
+  const FEEDS = [
+    ["realsenseVideoFeed", "realsensePlaceholder"],
+    ["controlVideoFeed", "controlVideoPlaceholder"],
+    ["videoFeed", "videoPlaceholderText"],
+  ];
+
+  function syncFeedPlaceholders() {
+    FEEDS.forEach(([imgId, phId]) => {
+      const img = document.getElementById(imgId);
+      const ph = document.getElementById(phId);
+      if (!img || !ph) return;
+      const live = img.naturalWidth > 0;
+      ph.style.display = live ? "none" : "block";
+      // 영상이 다시 오기 시작하면 되살린다 — onerror 가 껐을 수 있다.
+      if (live) img.style.display = "";
+    });
+  }
+
   function startPolling() {
+    syncFeedPlaceholders();
+    setInterval(syncFeedPlaceholders, 1000);
     fetchStatus();
     fetchLogs();
     fetchZones();

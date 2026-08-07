@@ -45,7 +45,7 @@
     <div class="panel-title">실시간 카메라 · 수어 인식</div>
     <div class="video-feed">
       <img id="videoFeed" src="{{ url_for('video_feed') }}" alt="RealSense 영상 스트림" onerror="this.style.display='none'; document.getElementById('videoPlaceholderText').style.display='block';">
-      <span id="videoPlaceholderText" class="video-placeholder-text">RealSense 영상 스트림</span>
+      <span id="videoPlaceholderText" class="video-placeholder-text" style="display: none">RealSense 영상 스트림</span>
     </div>
     <div class="recog-row">
       <span class="recog-label">인식된 수어:</span>
