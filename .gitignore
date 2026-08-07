@@ -2,6 +2,11 @@
 .env
 *.env
 !.env.example
+# 이것만 예외. 비밀정보가 아니라 **교시값**이다(조종 작업영역 상자) —
+# zones.yaml, center_calib.yaml 과 같은 성격이라 저장소에 있어야 한다.
+# 없으면 클론한 사람은 코드 기본값을 쓰게 되고, 그 순간 화면·문서에 적힌
+# 경계와 실제로 걸리는 경계가 갈라진다. 이름만 .env 라서 위 규칙에 걸렸다.
+!hand_gesture_control/teleop_box.env
 
 # ROS2 / colcon 산출물
 build/
