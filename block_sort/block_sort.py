@@ -177,6 +177,13 @@ ZONE_PICK_MAX = float(os.environ.get("ZONE_PICK_MAX", 75.0))
 # 통째로 밀린다.
 RESCAN_SKIP = int(os.environ.get("RESCAN_SKIP", 2))
 
+# 봐 뒀던 자리에서 블록이 사라졌을 때 다시 도는 범위. **순서가 곧 정책이다.**
+#   None → 기본(RESCAN_SKIP 만큼 앞을 건너뛴다). 빠르지만 앞쪽은 못 본다.
+#   0    → 경유점 전부. 사람이 앞쪽으로 옮겼을 때 그것까지 잡는다.
+# 빠른 것을 먼저 하고, 실패하면 넓게 한 번 더 본다(rescan 참고).
+RESCAN_SKIPS = (None, 0)
+RESCAN_TRIES = len(RESCAN_SKIPS)
+
 # 로봇구역 배치를 확인할 때 들르는 경유점(0-based). 전체 순회 대신 여기만 본다.
 # 실측 시야중심: 2번 경유점[297,166]이 안쪽(로봇3·4), 3번[518,129]이 바깥(로봇1·2).
 # 경유점을 바꾸면 이 값도 같이 봐야 한다.
@@ -853,12 +860,17 @@ class BlockSort(Node):
                     free.setdefault(color, []).append(det)
         return seen, free, occupied, ang
 
-    def patrol(self, want=None, stop_on_find=True):
+    def patrol(self, want=None, stop_on_find=True, skip=None):
         """관심 영역 위를 경유점 따라 한 바퀴 돈다.
 
         want 에 색 집합을 주고 stop_on_find 면, 그 색을 프리구역에서 보는 즉시
         멈추고 돌아온다 — 나머지 경유점을 도는 시간을 아낀다.
         want 가 없으면 끝까지 돌며 본 것을 모두 모은다.
+
+        skip 은 앞에서부터 건너뛸 경유점 수다. 기본은 want 가 있으면
+        RESCAN_SKIP(앞쪽은 프리 블록이 거의 없다), 없으면 0 이다.
+        **0 을 명시하면 want 가 있어도 전부 돈다** — 사람이 앞쪽으로 블록을
+        옮겨 두면 건너뛴 경유점에 있어서 못 찾는다(_rescan 참고).
 
         넓게 한 번에 보는 관측 자세를 없앤 이유: 멀리서 한 장에 다 담으면 블록이
         작게 잡혀 최소 면적에 걸리고, 비스듬히 보여 중심이 밀린다. 가까이서
@@ -872,10 +884,10 @@ class BlockSort(Node):
             self.get_logger().error(
                 "순회 경유점이 없습니다. python3 teach_zones.py scan 을 먼저 실행하세요.")
             return {}, {}, {}, None
-        start = 0
-        if want:
+        if skip is None:
             # 앞쪽 경유점에는 프리 블록이 없다. 자세한 이유는 RESCAN_SKIP 주석 참고.
-            start = min(RESCAN_SKIP, len(pts) - 1)
+            skip = RESCAN_SKIP if want else 0
+        start = min(max(int(skip), 0), len(pts) - 1)
         pts = pts[start:]
         hz = self.human_zones()
         seen, stock, occ, angles = {}, {}, {}, {}
@@ -1032,6 +1044,44 @@ class BlockSort(Node):
         self.get_logger().warn(f"복제 {'완료' if ok else '일부 실패'}")
         return ok
 
+    def rescan(self, color, xy):
+        """봐 뒀던 자리에서 블록이 사라졌을 때 다시 찾는다. 못 찾으면 None.
+
+        **사람이 그 사이에 옮기기 때문이다.** 복제는 한 색을 놓고 오는 동안
+        판을 보지 못하는데, 그 틈에 사람이 다음에 쓸 블록을 다른 곳으로 옮기면
+        봐 뒀던 좌표가 헛것이 된다(실측 2026-08-07: 첫 순회에서 본 색을 놓고
+        돌아오니 없어져 그대로 건너뛰었다).
+
+        두 번 돈다. **두 번의 범위가 다른 것이 요점이다.**
+
+            1차  그 색만, 뒤쪽 경유점부터(RESCAN_SKIP). 발견 즉시 멈춘다 — 빠르다.
+            2차  경유점 **전부**. 사람이 앞쪽(인간구역·안쪽 구역을 보는 자리)으로
+                 옮겼으면 1차가 그 자리를 통째로 지나친다. 그 경우를 여기서 잡는다.
+
+        찾은 자리는 프리구역인지 부르는 쪽이 다시 본다(pick_cached) — 사람이
+        구역 안에 놓았으면 집지 않는다.
+        """
+        for i, skip in enumerate(RESCAN_SKIPS, start=1):
+            where = "전체 경유점" if skip == 0 else "그 색만"
+            msg = (f"블록 사라짐 — {color} 가 ({xy[0]:.0f}, {xy[1]:.0f}) 에 없습니다. "
+                   f"재탐색 {i}/{RESCAN_TRIES} ({where})")
+            self.get_logger().warn(msg)
+            push_debug("warn", "재탐색", msg)
+            _, stock, _, _, _ = self.patrol(want={color}, skip=skip)
+            lst = stock.get(color) or []
+            if not lst:
+                continue
+            nxy = (lst[0]["pose"][0], lst[0]["pose"][1])
+            if not self.hover_over(nxy):
+                continue
+            pose = self.detect(color, near=nxy)
+            if pose is not None:
+                found = f"재탐색 {i}/{RESCAN_TRIES} 에서 {color} 발견 ({nxy[0]:.0f}, {nxy[1]:.0f})"
+                self.get_logger().warn(found)
+                push_debug("info", "재탐색", found)
+                return pose
+        return None
+
     def pick_cached(self, color, xy, zone, angle=None):
         """관측 때 봐 둔 자리로 곧장 가서 집고 구역에 놓는다.
 
@@ -1046,20 +1096,10 @@ class BlockSort(Node):
             return False
         pose = self.detect(color, near=xy, max_dist=CACHE_TOLERANCE)
         if pose is None:
-            # 그 자리에 없으면 블록이 굴렀거나 애초에 잘못 봤다. 그 색만 찾아
-            # 다시 한 바퀴 돌고, 발견하는 즉시 멈춰 거기서 집는다.
-            self.get_logger().warn(f"{color} 가 그 자리에 없음 — 그 색만 찾아 재순회")
-            _, stock, _, _, _ = self.patrol(want={color})
-            lst = stock.get(color) or []
-            if not lst:
-                return False
-            xy = (lst[0]["pose"][0], lst[0]["pose"][1])
-            if not self.hover_over(xy):
-                return False
-            pose = self.detect(color, near=xy)
+            pose = self.rescan(color, xy)
         if pose is None:
             self.get_logger().error(f"{color} 를 다시 못 찾았습니다 — 건너뜁니다.")
-            push_stock(color, "순회를 다시 돌아도 못 찾았습니다")
+            push_stock(color, f"{RESCAN_TRIES}번 다시 돌아도 못 찾았습니다")
             return False
         if not self.is_free(pose):
             # 관측 뒤에 판이 바뀌었거나 다른 개체를 잡은 것이다. 구역 위의 것은
