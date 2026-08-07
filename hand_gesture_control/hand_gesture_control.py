@@ -251,7 +251,9 @@ GAUGE_HALF_W = 0.05       # 그리는/판정하는 폭의 절반 (프레임 비�
 # 실제로 멈추는 구간이 어긋난다. 그 어긋남은 "가만히 있는데 팔이 내려간다" 로
 # 나타나므로 눈으로 알아채기 어렵다.
 # robot_teleop 은 import 만으로 로봇도 rclpy 도 건드리지 않는다(상수뿐).
-from robot_teleop import Z_DEADZONE                       # noqa: E402
+# Y_SIGN 도 같은 이유로 가져온다 — 화면의 좌우 글자와 실제로 나가는 속도 부호가
+# 갈라지면 사람이 반대로 밀게 된다(draw_roi 참고).
+from robot_teleop import Z_DEADZONE, Y_SIGN               # noqa: E402
 
 # z 손떨림 억제: 원시 z를 Z_SMOOTH_N 프레임 평균으로 다듬은 뒤, 그 값이 현재
 # self.z 에서 Z_DEADBAND 이상 벌어져야만 실제로 반영한다. 평균만으로는 계속
@@ -514,10 +516,18 @@ def draw_roi(frame):
                   D, 1, cv2.LINE_AA)
     cv2.circle(frame, (cx, cy), 3, C, -1, cv2.LINE_AA)
 
-    for txt, org in (("FWD", (cx - 16, cy - arm - 12)),
-                     ("BACK", (cx - 20, cy + arm + 22)),
-                     ("R", (cx - arm - 22, cy + 5)),
-                     ("L", (cx + arm + 10, cy + 5))):
+    # 글자 두 가지를 함께 적는다.
+    #   L/R      **조작자 기준**이고 항상 고정이다. 화면이 거울(cv2.flip)이라
+    #            내 오른손을 오른쪽으로 옮기면 화면에서도 오른쪽으로 간다.
+    #   ±Y       그때 base 로 나가는 부호. 선 자리에 따라 뒤집히므로
+    #            **실제로 보내는 값(Y_SIGN)에서 뽑는다.**
+    # 축 글자를 손으로 박아두면 매핑을 바꿨을 때 화면만 옛말을 한다 — 조종에서
+    # 화면이 거짓말하면 사람이 반대로 밀고, 그건 팔이 엉뚱한 쪽으로 가는 것이다.
+    right_ax, left_ax = ("+Y", "-Y") if Y_SIGN < 0 else ("-Y", "+Y")
+    for txt, org in (("FWD +X", (cx - 30, cy - arm - 12)),
+                     ("BACK -X", (cx - 34, cy + arm + 22)),
+                     (f"L {left_ax}", (cx - arm - 60, cy + 5)),
+                     (f"R {right_ax}", (cx + arm + 10, cy + 5))):
         cv2.putText(frame, txt, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, C, 1, cv2.LINE_AA)
     cv2.putText(frame, "STOP", (cx - 20, cy - dead - 6),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, D, 1, cv2.LINE_AA)

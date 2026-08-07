@@ -78,18 +78,25 @@ assert b == a, (a, b)
 assert len(sent) == 2, sent
 print(f"2 편차 0.2 와 1.0 이 같은 속도  {a}   (매 프레임 갱신: {len(sent)}건)")
 
-# ── 3. 좌우는 거울 ──
+# ── 3. 좌우는 선 자리에 달렸다 (Y_SIGN) ──
+#     기본은 '로봇을 마주보고 조종' 이라 내 오른쪽이 로봇의 왼쪽(+y)이다.
+#     화면 글자(draw_roi)도 이 부호에서 뽑으므로 둘이 갈라질 수 없다.
 t, g, p = make()
 zc = Z_STOP
-t.update((0.6, 0.0), zc, True, True)
-assert sent[-1] == [0.0, -rt.TELEOP_SPEED, 0.0], sent[-1]
-print(f"3 화면 오른쪽 → -y        {sent[-1]}")
+t.update((0.6, 0.0), zc, True, True)          # 화면 오른쪽 = 내 오른쪽
+want_y = rt.Y_SIGN * -rt.TELEOP_SPEED
+assert sent[-1] == [0.0, want_y, 0.0], sent[-1]
+t.update((-0.6, 0.0), zc, True, True)         # 왼쪽은 반대 부호
+assert sent[-1] == [0.0, -want_y, 0.0], sent[-1]
+assert rt.Y_SIGN in (1.0, -1.0)
+print(f"3 화면 오른쪽 → y={want_y:+.0f}   "
+      f"(마주보고 조종: {'예' if rt.FACE_ROBOT else '아니오'})")
 
 # ── 4. 대각선은 두 축 동시 ──
 t, g, p = make()
 zc = Z_STOP
-t.update((-0.5, -0.5), zc, True, True)
-assert sent[-1] == [rt.TELEOP_SPEED, rt.TELEOP_SPEED, 0.0], sent[-1]
+t.update((-0.5, -0.5), zc, True, True)        # 화면 왼쪽 위 = 앞 + 내 왼쪽
+assert sent[-1] == [rt.TELEOP_SPEED, -want_y, 0.0], sent[-1]
 print(f"4 대각선 → 두 축          {sent[-1]}")
 
 # ── 5. 손이 사라지면 정지 (데드맨) ──
@@ -168,12 +175,14 @@ print("10 위치 불명 → 조종 안 켜짐 (지령 0건)")
 t, g, p = make()
 zc = Z_STOP
 t.update((0.0, 0.5), zc, True, True)        # -x
-t.update((0.6, 0.0), zc, True, True)        # -y
+t.update((0.6, 0.0), zc, True, True)        # y 한쪽
+t.update((-0.6, 0.0), zc, True, True)       # y 반대쪽
 t.update((0.0, 0.0), zc, True, True)        # 정지
 assert [-rt.TELEOP_SPEED, 0.0, 0.0] in sent, sent
-assert [0.0, -rt.TELEOP_SPEED, 0.0] in sent, sent
+assert [0.0, want_y, 0.0] in sent, sent
+assert [0.0, -want_y, 0.0] in sent, sent    # 음수 쪽도 실제로 나가야 한다
 assert sent[-1] == [0.0, 0.0, 0.0], sent
 assert rt.TELEOP_CMD_SEC > 0
-print(f"11 -x/-y/정지 전부 발행됨   유효시간 {rt.TELEOP_CMD_SEC}s")
+print(f"11 -x/±y/정지 전부 발행됨   유효시간 {rt.TELEOP_CMD_SEC}s")
 
 print("\n전부 통과")
