@@ -81,3 +81,29 @@ print(f"8 기울어진(20°) 축에서도 같은 계산 성립 (틈 {new_gap_til
 
 print("\n전부 통과 — 실기에서는 relocate_blocker()가 목적지 충돌 확인 후 "
       "실제로 집어서 옮기는지, 그 뒤 원래 블록을 집을 수 있게 되는지 본다")
+
+
+# ── 9. 치울 이웃은 **그 자신을 집을 수 있는** 것으로 고른다 ──
+#     이게 없으면 치우기가 자기 발에 걸린다: 이웃을 집으려 할 때 원래 목표가
+#     그 이웃의 이웃이라 같은 '좁음' 판정에 걸려 파지가 포기된다
+#     (실측 2026-08-07: "파란색을 치우라" 는 말만 반복했다).
+from block_geom import graspable_blocker  # noqa: E402
+
+T = (400.0, 0.0)
+GAP = BLOCK_MM + 5.0            # 중심거리 40mm = 틈 5mm (막힘)
+
+# (a) ㄱ 자: x 와 y 가 막혔다. y 쪽 이웃은 자기 위가 비어 있어 집을 수 있다.
+L = [(T[0] + GAP, T[1]), (T[0], T[1] + GAP)]
+b = graspable_blocker(T, 0.0, L)
+assert b is not None, "ㄱ 자에서는 하나는 집을 수 있어야 한다"
+print(f"9a ㄱ 자 배치 → 치울 이웃 ({b[0]:.0f},{b[1]:.0f}) 선택")
+
+# (b) 2×2 뭉치: 넷이 서로 막아 아무도 못 집는다 → None (사람이 치워야 한다)
+Q = [(T[0] + GAP, T[1]), (T[0], T[1] + GAP), (T[0] + GAP, T[1] + GAP)]
+assert graspable_blocker(T, 0.0, Q) is None, "2×2 뭉치는 아무도 못 집는다"
+print("9b 2×2 뭉치 → None (연쇄로 파고들지 않고 사람에게 넘긴다)")
+
+# (c) 막지 않는 이웃은 고르지 않는다 (옮겨도 소용없다)
+far = [(T[0] + 200.0, T[1])]
+assert graspable_blocker(T, 0.0, far) is None
+print("9c 안 막는 이웃은 고르지 않는다")

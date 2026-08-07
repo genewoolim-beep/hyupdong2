@@ -258,3 +258,38 @@ def reorder_for_conflicts(plan, positions, finger_t=FINGER_T):
     for t in plan:
         by_color.setdefault(t[2], []).append(t)
     return [t for c in color_order for t in by_color[c]]
+
+
+def graspable_blocker(target_xy, axis_deg, neighbors, finger_t=FINGER_T, **kw):
+    """막는 이웃 중 **그 자신을 집을 수 있는** 것을 고른다. 없으면 None.
+
+    이것이 없으면 이웃 치우기가 자기 발에 걸린다. 이웃을 치우려면 먼저 그 이웃을
+    집어야 하는데, 이웃 입장에서는 **원래 목표가 자기 이웃**이다(붙어 있으니까
+    막은 것이다). 그래서 이웃을 집으려 할 때 같은 '좁음' 판정에 걸려 파지가
+    포기되고, 치우기가 시작조차 못 한다(실측 2026-08-07: 파란색을 치우라는 말만
+    반복했다).
+
+    그러므로 **집을 수 있는 이웃**을 골라야 한다. 판정은 파지와 같은 것을 쓴다 —
+    그 이웃을 목표로 놓고, 나머지 전부(원래 목표 포함)를 이웃으로 두고 두 축의
+    여유를 본다. 손목을 90° 돌릴 수 있으니 두 축 중 넓은 쪽으로 판단한다.
+
+    여러 개면 **가장 여유가 큰** 것을 고른다 — 집기 쉬운 것부터 치우는 게 낫다.
+    아무도 못 집으면 None 이고, 그때는 사람이 손으로 치워야 한다(연쇄로 파고들지
+    않는다 — 끝없이 번질 수 있다).
+    """
+    import numpy as np
+    pts = [(float(n[0]), float(n[1])) for n in neighbors]
+    best, best_xy = -float("inf"), None
+    for i, b in enumerate(pts):
+        # ① 이 이웃이 실제로 목표를 막고 있는가 (아니면 옮겨도 소용없다)
+        blocks = min(approach_gap(target_xy, axis_deg, [b], **kw),
+                     approach_gap(target_xy, axis_deg + 90.0, [b], **kw))
+        if blocks >= finger_t:
+            continue
+        # ② 그 이웃 자신을 집을 수 있는가 (원래 목표도 이웃으로 넣는다)
+        others = [p for j, p in enumerate(pts) if j != i] + [tuple(target_xy)]
+        room = max(approach_gap(b, axis_deg, others, **kw),
+                   approach_gap(b, axis_deg + 90.0, others, **kw))
+        if room >= finger_t and room > best:
+            best, best_xy = room, b
+    return best_xy

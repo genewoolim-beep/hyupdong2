@@ -46,6 +46,7 @@ from od_msg.srv import SrvDepthPosition
 # 있는 계산은 block_geom 에 모아 test_copy_angle.py 가 그대로 시험한다.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from block_geom import (BLOCK_MM, best_axis, blocking_neighbor, fold90,
+                        graspable_blocker,
                         relocate_step, reorder_for_conflicts, rotate_tool,
                         tool_yaw)   # noqa: E402
 
@@ -1492,8 +1493,23 @@ class BlockSort(Node):
         성공하면 True. 실패해도 예외를 올리지 않는다 — 부르는 쪽이 원래
         하던 대로(경고 후 파지 포기) 계속하면 된다.
         """
-        bxy = blocking_neighbor(target_xy, axis_deg, [(x, y) for x, y, _c in neighbors])
+        # **집을 수 있는 이웃**을 고른다. 가장 가까운 이웃(blocking_neighbor)을
+        # 그냥 집으려 하면 자기 발에 걸린다 — 그 이웃 입장에서는 원래 목표가
+        # 자기 이웃이라(붙어 있으니 막은 것이다) 같은 '좁음' 판정에 걸려 파지가
+        # 포기되고, 치우기가 시작조차 못 한다(실측 2026-08-07: "파란색을 치우라" 는
+        # 말만 반복했다). 그래서 두 축 중 한쪽이라도 열린 이웃을 고른다.
+        pts = [(x, y) for x, y, _c in neighbors]
+        bxy = graspable_blocker(target_xy, axis_deg, pts)
         if bxy is None:
+            # 아무도 못 집는다(예: 2×2 뭉치). 연쇄로 파고들지 않는다 — 끝없이
+            # 번질 수 있다. 사람이 손으로 하나 떼어내야 풀린다.
+            nearest = blocking_neighbor(target_xy, axis_deg, pts)
+            if nearest is not None:
+                self.get_logger().error(
+                    "막는 이웃들도 서로 붙어 있어 집을 수가 없습니다 — "
+                    "블록 하나를 손으로 떼어 주세요")
+                push_debug("warn", "파지",
+                           "블록들이 서로 붙어 있어 로봇이 풀 수 없습니다 — 하나를 떼어 주세요")
             return False
         color = next((c for x, y, c in neighbors
                      if np.hypot(x - bxy[0], y - bxy[1]) < 1.0), None)
