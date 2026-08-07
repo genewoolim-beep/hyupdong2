@@ -45,9 +45,9 @@ from od_msg.srv import SrvDepthPosition
 # 순간 DSR 에 붙어서 로봇 없이는 시험할 수 없기 때문이다 — 책상에서 확인할 수
 # 있는 계산은 block_geom 에 모아 test_copy_angle.py 가 그대로 시험한다.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from block_geom import (BLOCK_MM, best_axis, blocking_neighbor, fold90,
-                        graspable_blocker,
-                        relocate_step, reorder_for_conflicts, rotate_tool,
+from block_geom import (BLOCK_MM, LANE_HALF, RELOCATE_CLEAR_MIN, best_axis,
+                        blocking_neighbor, fold90, graspable_blocker, lane_offsets,
+                        relocate_candidates, reorder_for_conflicts, rotate_tool,
                         tool_yaw)   # noqa: E402
 
 ROBOT_ID, ROBOT_MODEL = "dsr01", "m0609"
@@ -1441,6 +1441,17 @@ class BlockSort(Node):
             """무한(방해 없음)을 '충분' 으로 읽히게. 'infmm' 은 로그에서 읽기 어렵다."""
             return "충분" if v == float("inf") else f"{v:.0f}mm"
 
+        # 어느 축에서 무엇이 막는지 함께 찍는다 — 이것 없이는 "왜 저 블록을
+        # 치우려 하지" 를 로그로 따라갈 수 없다(실측 2026-08-07 에 그걸로 헤맸다).
+        used = axis + turn
+        lane = []
+        for x, y, c in nb:
+            al, sd = lane_offsets((pose[0], pose[1]), (x, y), used)
+            if abs(sd) < LANE_HALF:
+                lane.append((c, round(abs(al) - BLOCK_MM)))
+        self.get_logger().info(
+            f"파지축 {used % 180:.0f}° — 이 축에서 막는 것: "
+            + (", ".join(f"{c} 틈{g}mm" for c, g in lane) if lane else "없음"))
         if turn:
             self.get_logger().warn(
                 f"옆 블록 때문에 손목을 {turn:+.0f}° 돌립니다 — "
@@ -1463,6 +1474,14 @@ class BlockSort(Node):
                 moved = self.relocate_blocker((pose[0], pose[1]), axis + turn, nb)
                 self.last_rot = saved_last_rot
                 if moved:
+                    # **목표 위로 돌아가서 다시 본다.** 치우고 나면 팔이 치운 자리
+                    # 위에 있어, 그대로 재검출하면 목표 주변이 시야에 제대로 안
+                    # 들어온다 — 방금 치운 것도, 앞서 치운 것도 반영이 안 된다.
+                    # 돌아가서 보면 판의 **지금 상태**로 다시 판단한다(치운 블록은
+                    # 사라졌고, 남은 방해물만 남는다).
+                    if not self.hover_over((pose[0], pose[1])):
+                        self.get_logger().warn("목표 위로 돌아가지 못해 재판단을 건너뜁니다")
+                        return None
                     return self.aim_between_neighbors(pose, allow_relocate, _tries + 1)
             self.get_logger().error(
                 f"양쪽 다 좁습니다 (틈 {mm(gap)} < 손가락 {FINGER_GAP_MIN:.0f}mm) — "
@@ -1498,15 +1517,25 @@ class BlockSort(Node):
         # 자기 이웃이라(붙어 있으니 막은 것이다) 같은 '좁음' 판정에 걸려 파지가
         # 포기되고, 치우기가 시작조차 못 한다(실측 2026-08-07: "파란색을 치우라" 는
         # 말만 반복했다). 그래서 두 축 중 한쪽이라도 열린 이웃을 고른다.
+        # **이 축에서 막고 있고, 그 자신을 집을 수 있는** 이웃을 고른다.
+        #
+        # 두 가지를 다 봐야 한다. 지금 쓰려는 축과 무관한 블록을 치우면 헛수고고
+        # (실측: 축 119.8°에서 막는 것은 파랑·보라인데 주황을 치웠다), 집을 수
+        # 없는 블록을 고르면 치우기가 시작조차 못 한다(그 이웃 입장에서는 원래
+        # 목표가 자기 이웃이라 같은 '좁음' 판정에 걸린다).
+        #
+        # 손가락은 **양쪽에서** 내려오므로 한 축을 열려면 그 축의 양쪽을 다
+        # 치워야 한다. 한 번에 하나씩 치우고, 목표 위로 돌아가 다시 보는 것을
+        # RELOCATE_MAX_TRIES 만큼 되풀이한다 — 앞서 치운 것은 그 재검출에
+        # 반영된다(치운 블록은 이미 그 자리에 없다).
         pts = [(x, y) for x, y, _c in neighbors]
         bxy = graspable_blocker(target_xy, axis_deg, pts)
         if bxy is None:
-            # 아무도 못 집는다(예: 2×2 뭉치). 연쇄로 파고들지 않는다 — 끝없이
-            # 번질 수 있다. 사람이 손으로 하나 떼어내야 풀린다.
-            nearest = blocking_neighbor(target_xy, axis_deg, pts)
-            if nearest is not None:
+            # 이 축을 막는 것 중 집을 수 있는 게 없다(예: 서로 붙은 뭉치).
+            # 연쇄로 파고들지 않는다 — 끝없이 번질 수 있다.
+            if blocking_neighbor(target_xy, axis_deg, pts) is not None:
                 self.get_logger().error(
-                    "막는 이웃들도 서로 붙어 있어 집을 수가 없습니다 — "
+                    "이 축을 막는 블록들이 서로도 붙어 있어 집을 수가 없습니다 — "
                     "블록 하나를 손으로 떼어 주세요")
                 push_debug("warn", "파지",
                            "블록들이 서로 붙어 있어 로봇이 풀 수 없습니다 — 하나를 떼어 주세요")
@@ -1515,46 +1544,49 @@ class BlockSort(Node):
                      if np.hypot(x - bxy[0], y - bxy[1]) < 1.0), None)
         if color is None:
             return False
-        dest = relocate_step(target_xy, bxy, axis_deg)
-        if dest is None:
-            return False
-        # **판 밖으로 보내지 않는다.** 팀원이 남긴 미해결 항목이다 — 목적지가
-        # 다른 블록과 겹치는지는 봤지만 판 경계는 아무도 안 봤다.
-        # 경계는 조종 쪽 교시 상자를 빌린다(reach_box). 그것도 없으면 구역
-        # 좌표를 감싸는 상자에 여유를 준 것으로 물러난다.
+
+        # 판 경계. 후보를 걸러야 하므로 **먼저** 구한다.
+        # block_sort 에는 판 경계가 없었다 — 경계는 조종 쪽 교시 상자를 빌린다
+        # (reach_box). 그것도 없으면 구역 좌표를 감싸는 상자로 물러난다.
         box = reach_box()
         if box is None:
-            xs = [p[0] for p in self.all_zone_xy()]
-            ys = [p[1] for p in self.all_zone_xy()]
+            zs = self.all_zone_xy()
             m = ZONE_RADIUS + BLOCK_MM
-            box = (min(xs) - m, max(xs) + m, min(ys) - m, max(ys) + m)
-        # **구역 안에 버리지 않는다.** 프리구역으로만 치워야 한다 — 구역에 놓으면
-        # is_free 가 그것을 '구역 블록' 으로 보게 되어, 복제가 그 칸을 '이미 놓였다'
-        # 고 판단하거나 본보기를 오독한다. 판을 어지럽히는 쪽으로 고장난다.
-        if not self.is_free(dest):
+            box = (min(p[0] for p in zs) - m, max(p[0] for p in zs) + m,
+                   min(p[1] for p in zs) - m, max(p[1] for p in zs) + m)
+        bx0, bx1, by0, by1 = box
+
+        # 치울 자리를 **여러 곳** 본다. 한 곳만 계산하면 그 자리가 막혔을 때
+        # 그대로 포기한다(실측 2026-08-07: 유일한 후보가 51.6mm 옆 블록 때문에
+        # 거부돼 치우기가 무산됐다 — 겹치지도 않는 거리였다).
+        # 두 단계로 본다. ① 파지 여유가 나는 자리를 먼저 찾고, 없으면
+        # ② 겹치지만 않는 자리로 물러난다 — 임시로 치워 두는 자리다.
+        cands = relocate_candidates(target_xy, bxy, axis_deg)
+        dest, tier = None, None
+        for tname, need in (("파지여유", BLOCK_MM + FINGER_GAP_MIN),
+                            ("겹침없음", RELOCATE_CLEAR_MIN)):
+            for c in cands:
+                if not self.is_free(c):
+                    continue                        # 구역 안 — 프리구역으로만 치운다
+                if not (bx0 <= c[0] <= bx1 and by0 <= c[1] <= by1):
+                    continue                        # 판 밖
+                # self_r=0 — 빈 자리를 보는 것이라 '자기 자신' 이 없다.
+                # 옮길 블록 자신만 뺀다(곧 그 자리를 비운다).
+                if [n for n in self.neighbors_xy(c, radius=need, self_r=0.0)
+                        if np.hypot(n[0] - bxy[0], n[1] - bxy[1]) > 5.0]:
+                    continue
+                dest, tier = c, tname
+                break
+            if dest is not None:
+                break
+        if dest is None:
             self.get_logger().warn(
-                f"옮길 자리({dest[0]:.0f},{dest[1]:.0f})가 구역 안이라 포기합니다 "
-                f"— 프리구역으로만 치웁니다")
-            push_debug("warn", "파지", "이웃을 치울 자리가 구역 안이라 포기했습니다")
+                f"{color}({bxy[0]:.0f},{bxy[1]:.0f})를 치울 자리를 못 찾았습니다 "
+                f"— 후보 {len(cands)}곳이 모두 막힘·구역·판밖입니다. 사람이 치워 주세요")
+            push_debug("warn", "파지", f"{color} 를 치울 자리가 없습니다")
             return False
-        x0, x1, y0, y1 = box
-        if not (x0 <= dest[0] <= x1 and y0 <= dest[1] <= y1):
-            self.get_logger().warn(
-                f"옮길 자리({dest[0]:.0f},{dest[1]:.0f})가 "
-                f"판 범위(x {x0:.0f}~{x1:.0f}, y {y0:.0f}~{y1:.0f}) 밖이라 포기합니다")
-            push_debug("warn", "파지", "이웃을 치울 자리가 판 밖이라 포기했습니다")
-            return False
-        # **self_r=0.** 빈 자리를 보는 것이라 '자기 자신' 이 없다. 기본값을 쓰면
-        # 30mm 안의 블록을 자기 자신으로 착각해 그 위에 내려놓는다.
-        # 옮길 블록 자신(bxy)만 뺀다 — 그건 곧 자리를 비울 것이다.
-        blocked = [n for n in self.neighbors_xy(dest, radius=BLOCK_MM + FINGER_GAP_MIN,
-                                                self_r=0.0)
-                  if np.hypot(n[0] - bxy[0], n[1] - bxy[1]) > 5.0]
-        if blocked:
-            self.get_logger().warn(
-                f"{color}({bxy[0]:.0f},{bxy[1]:.0f})를 옮길 자리"
-                f"({dest[0]:.0f},{dest[1]:.0f})도 다른 블록에 막혀 포기합니다")
-            return False
+        self.get_logger().info(f"치울 자리 후보 {len(cands)}곳 중 ({dest[0]:.0f},"
+                               f"{dest[1]:.0f}) 선택 [{tier}]")
         self.get_logger().warn(
             f"{color}({bxy[0]:.0f},{bxy[1]:.0f})가 막고 있어 "
             f"({dest[0]:.0f},{dest[1]:.0f})로 치웁니다")

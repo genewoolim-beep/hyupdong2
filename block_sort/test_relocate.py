@@ -107,3 +107,58 @@ print("9b 2×2 뭉치 → None (연쇄로 파고들지 않고 사람에게 넘�
 far = [(T[0] + 200.0, T[1])]
 assert graspable_blocker(T, 0.0, far) is None
 print("9c 안 막는 이웃은 고르지 않는다")
+
+
+# ── 10. 실기에서 실패한 그 배치 (2026-08-07 로그) ──
+#     빨간 블록이 네 블록에 **십자로 포위**됐다. 모두 ~49mm 라 틈 14mm.
+#     이 배치에서 실패한 이유가 셋이었고 셋 다 고쳤다:
+#       ① 지금 쓰는 축과 무관한 블록(주황)을 치우려 했다 → 축의 방해물만 고른다
+#       ② 치울 자리를 한 곳만 봤고 그 자리가 51.6mm 옆 블록에 걸렸다 → 여러 곳
+#       ③ 임시 자리에 파지 여유(62mm)를 요구했다 → 겹침만 안 하면 되게 두 단계
+#     손가락은 양쪽에서 내려오므로 **한 축의 양쪽을 다** 치워야 열린다(2회).
+from block_geom import (best_axis, graspable_blocker,   # noqa: E402
+                        relocate_candidates, RELOCATE_CLEAR_MIN)
+
+REAL_T = (574.8, 115.7)
+REAL_NB = {"주황": (532.0, 92.0), "노랑": (618.0, 142.0),
+           "파랑": (599.0, 73.0), "보라": (550.0, 158.0)}
+REAL_AXIS = 119.8                      # 로그의 손목 +60° 상황 (역산값)
+FULL = BLOCK_MM + FINGER_T
+
+
+def _one_round(cur, axis):
+    """한 번 판단해서 (치울 색, 목적지) 또는 None(파지 가능/불가)."""
+    pts = list(cur.values())
+    turn, gap, _ = best_axis(REAL_T, axis, pts)
+    used = axis + turn
+    if gap >= FINGER_T:
+        return "가능", None, used
+    b = graspable_blocker(REAL_T, used, pts)
+    if b is None:
+        return "뭉치", None, used
+    name = next(k for k, v in cur.items()
+                if abs(v[0] - b[0]) < 1 and abs(v[1] - b[1]) < 1)
+    others = [v for k, v in cur.items() if k != name] + [REAL_T]
+    for need in (FULL, RELOCATE_CLEAR_MIN):
+        for c in relocate_candidates(REAL_T, b, used):
+            if min(np.hypot(c[0] - x, c[1] - y) for x, y in others) >= need:
+                return name, c, used
+    return name, None, used
+
+
+cur = dict(REAL_NB)
+moved = []
+for _ in range(3):
+    name, dest, used = _one_round(cur, REAL_AXIS)
+    if name == "가능":
+        break
+    assert name != "뭉치", "이 배치는 뭉치가 아니다 — 치울 수 있어야 한다"
+    assert dest is not None, f"{name} 를 치울 자리를 못 찾았다"
+    moved.append(name)
+    cur.pop(name)
+else:
+    raise AssertionError(f"세 번 안에 못 열었다 (치운 것: {moved})")
+
+assert moved == ["파랑", "보라"], f"축을 막는 둘을 치워야 한다 — 치운 것: {moved}"
+print(f"10 실기 배치(십자 포위) → {' → '.join(moved)} 치우고 파지 가능  "
+      f"(주황·노랑은 이 축을 안 막으므로 건드리지 않는다)")

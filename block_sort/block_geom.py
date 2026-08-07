@@ -277,14 +277,18 @@ def graspable_blocker(target_xy, axis_deg, neighbors, finger_t=FINGER_T, **kw):
     아무도 못 집으면 None 이고, 그때는 사람이 손으로 치워야 한다(연쇄로 파고들지
     않는다 — 끝없이 번질 수 있다).
     """
-    import numpy as np
     pts = [(float(n[0]), float(n[1])) for n in neighbors]
     best, best_xy = -float("inf"), None
     for i, b in enumerate(pts):
-        # ① 이 이웃이 실제로 목표를 막고 있는가 (아니면 옮겨도 소용없다)
-        blocks = min(approach_gap(target_xy, axis_deg, [b], **kw),
-                     approach_gap(target_xy, axis_deg + 90.0, [b], **kw))
-        if blocks >= finger_t:
+        # ① 이 이웃이 **이 축에서** 막고 있는가.
+        #
+        # 두 축 중 어느 쪽이든 막으면 후보로 봤더니, 지금 쓰려는 축과 무관한
+        # 블록을 치우고 있었다 — 치워도 그 축은 그대로 막혀 있으니 헛수고다
+        # (실측 2026-08-07: 축 119.8° 에서 막는 것은 파랑·보라인데 주황을 치웠다).
+        # **한 축을 열기로 정했으면 그 축의 방해물만 치운다.** 손가락은 양쪽에서
+        # 내려오므로 그 축의 양쪽을 다 치워야 열린다 — 한 번에 하나씩, 부르는 쪽이
+        # RELOCATE_MAX_TRIES 만큼 되풀이한다.
+        if approach_gap(target_xy, axis_deg, [b], **kw) >= finger_t:
             continue
         # ② 그 이웃 자신을 집을 수 있는가 (원래 목표도 이웃으로 넣는다)
         others = [p for j, p in enumerate(pts) if j != i] + [tuple(target_xy)]
@@ -293,3 +297,73 @@ def graspable_blocker(target_xy, axis_deg, neighbors, finger_t=FINGER_T, **kw):
         if room >= finger_t and room > best:
             best, best_xy = room, b
     return best_xy
+
+
+# 임시로 치워 두는 자리에 요구할 최소 중심거리(mm). 파지 여유(블록+손가락=62)를
+# 요구하면 꽉 찬 판에서는 사실상 자리가 없다 — 실측 2026-08-07: 옮길 자리에서
+# 51.6mm 떨어진(즉 16mm 떨어져 겹치지도 않는) 블록 때문에 포기했다.
+# 여기서는 **겹치지 않는 것**만 본다. 파지 여유가 나는 자리가 있으면 그쪽을
+# 먼저 쓰고(부르는 쪽이 두 단계로 본다), 없을 때 이 값으로 물러난다.
+RELOCATE_CLEAR_MIN = BLOCK_MM + 8.0
+
+
+def relocate_candidates(target_xy, blocker_xy, axis_deg, finger_t=FINGER_T,
+                        block_mm=BLOCK_MM, margin=RELOCATE_MARGIN,
+                        lane_half=LANE_HALF):
+    """blocker 를 치울 자리 후보들을 **좋은 순서로** 돌려준다.
+
+    한 곳만 계산해서 그 자리가 막혀 있으면 포기하던 것을 고치기 위한 것이다
+    (실측 2026-08-07: 사방이 포위된 블록에서 유일한 후보가 막혀 치우기가 무산됐다).
+
+    순서의 뜻:
+      ① 축 방향으로 밀기        — 판을 가장 덜 어지럽힌다(relocate_step 과 같다)
+      ② 축과 **직각**으로 밀기   — 손가락 지나가는 길(lane)에서 빼면 되므로
+                                 보통 ①보다 짧게 움직인다
+      ③ 더 멀리 / 대각선        — 앞이 다 막혔을 때
+
+    후보는 **그 블록이 더는 목표를 막지 않는 자리**만 남긴다(두 축 모두에서).
+    실제로 비었는지·구역인지·판 안인지는 비전이 있는 부르는 쪽이 본다.
+    """
+    import numpy as np
+    r = np.radians(float(axis_deg))
+    ax = np.array([np.cos(r), np.sin(r)])
+    perp = np.array([-ax[1], ax[0]])
+    t = np.array([float(target_xy[0]), float(target_xy[1])])
+    b = np.array([float(blocker_xy[0]), float(blocker_xy[1])])
+    d = b - t
+    along, side = float(ax @ d), float(perp @ d)
+    s_along = 1.0 if along >= 0 else -1.0
+    s_side = 1.0 if side >= 0 else -1.0
+
+    need_along = (block_mm + finger_t + margin) - abs(along)
+    need_side = (lane_half + block_mm / 2.0 + margin) - abs(side)
+
+    out = []
+    if need_along > 0:
+        out.append(b + s_along * need_along * ax)
+    if need_side > 0:
+        out.append(b + s_side * need_side * perp)          # 가까운 쪽으로 빼기
+        out.append(b - s_side * (need_side + 2 * abs(side)) * perp)   # 반대쪽으로
+    if need_along > 0:
+        out.append(b + s_along * (need_along * 1.8) * ax)  # 더 멀리
+        if need_side > 0:                                   # 대각선
+            out.append(b + s_along * need_along * ax + s_side * need_side * perp)
+
+    keep = []
+    for c in out:
+        c = (float(c[0]), float(c[1]))
+        if (approach_gap(target_xy, axis_deg, [c], block_mm=block_mm,
+                         lane_half=lane_half) >= finger_t
+                and approach_gap(target_xy, axis_deg + 90.0, [c], block_mm=block_mm,
+                                 lane_half=lane_half) >= finger_t):
+            keep.append(c)
+    return keep
+
+
+def lane_offsets(target_xy, xy, axis_deg):
+    """(축 방향 거리, 옆으로 비낀 거리). 로그로 "왜 저것이 막는가" 를 보여줄 때 쓴다."""
+    import numpy as np
+    r = np.radians(float(axis_deg))
+    ax = np.array([np.cos(r), np.sin(r)])
+    d = np.array([float(xy[0]) - target_xy[0], float(xy[1]) - target_xy[1]])
+    return float(ax @ d), float(np.array([-ax[1], ax[0]]) @ d)
