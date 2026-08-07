@@ -229,10 +229,39 @@ def depth_at(depth, cx, cy, half=4):
     return float(np.median(vals))
 
 
+def depth_from_size(box, ang, fx):
+    """블록의 화면 크기로 거리를 추정한다(mm). 못 하면 None.
+
+    **깊이 센서가 가까이서 죽는 것을 메운다.** D435i 의 최소 측정거리는
+    1280x720 에서 약 280mm 인데, 그리퍼가 파지 높이로 내려가면 블록 윗면은
+    카메라에서 200mm 안쪽으로 들어온다 — 깊이가 0 이 되어 블록이 통째로
+    사라진다(실측 2026-08-07: 내려가면 파지 구역 추적이 끊겼다).
+    한 변이 35mm 인 것을 아니까, 화면에서 몇 픽셀인지 보면 거리가 나온다.
+    가까울수록 크게 잡혀 이 추정은 **가까이서 더 정확하다** — 깊이가 약한
+    바로 그 구간이다.
+
+    축정렬 박스는 블록이 기울면 커진다(45°에서 1.41배). 검출이 함께 주는
+    회전각으로 되돌린다: AABB 한 변 = 실제 한 변 × (|cos|+|sin|).
+    """
+    import numpy as _np
+    x0, y0, x1, y1 = box
+    side_px = min(x1 - x0, y1 - y0)
+    if side_px <= 2:
+        return None
+    r = _np.radians(float(ang))
+    scale = abs(_np.cos(r)) + abs(_np.sin(r))
+    side_px = side_px / max(scale, 1e-6)
+    return float(fx * BLOCK_MM / side_px)
+
+
 def find_blocks(view, frame_bgr, depth, det):
-    """화면에 보이는 블록마다 (카메라좌표 mm, 색이름). 깊이를 못 읽은 것은 버린다."""
+    """화면에 보이는 블록마다 (카메라좌표 mm, 색이름, 거리출처).
+
+    거리는 깊이 영상이 우선이고, 없으면 블록 크기로 추정한다 — 가까이서 깊이가
+    죽는 구간을 메운다(depth_from_size). 둘 다 안 되면 그 블록은 버린다.
+    """
     import cv2
-    if det is None or depth is None or view.intr is None:
+    if det is None or view.intr is None:
         return []
     colors, max_ratio, detect = det
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
@@ -243,32 +272,55 @@ def find_blocks(view, frame_bgr, depth, det):
             found, _stats = detect(hsv, ranges, max_area, depth)
         except Exception:
             continue
-        for _box, _ang, cx, cy in found:
-            d = depth_at(depth, cx, cy)
+        for box, ang, cx, cy in found:
+            d = None if depth is None else depth_at(depth, cx, cy)
+            how = "깊이"
+            if d is None:
+                d = depth_from_size(box, ang, view.intr["fx"])
+                how = "크기"
             if d is None:
                 continue
             p = view.unproject(cx, cy, d)
             if p is not None:
-                out.append((p, name))
+                out.append((p, name, how))
     return out
 
 
 def draw(frame, view, blocks, z_default=200.0):
     """파지 구역과 판정을 프레임에 겹쳐 그린다. (그린 상태, 대상) 을 돌려준다.
 
-    blocks 는 [(카메라좌표, 색이름), ...]. 비어 있으면 기본 거리에 빨간 네모만.
-    가능한 블록이 있으면 그 블록 높이에 초록 네모를 그리고 "파지 가능" 을 띄운다.
+    blocks 는 [(카메라좌표, 색이름, 거리출처), ...]. 비어 있으면 기본 거리에
+    빨간 네모만. 가능한 블록이 있으면 그 블록 높이에 초록 네모를 그리고
+    "파지 가능" 을 띄운다.
     """
     import cv2
 
+    # 여럿이면 **가장 잘 들어온 것**을 고른다. 목록 순서(색 순서)로 고르면
+    # 화면 구석의 빨간 블록 때문에 정작 손가락 밑의 파란 블록을 놓친다.
     hit = None
-    for p_cam, name in blocks:
+    best = None
+    for b in blocks:
+        p_cam, name, how = (b if len(b) == 3 else (b[0], b[1], "깊이"))
         ok, why = view.graspable(p_cam)
-        if ok:
-            hit = (p_cam, name, why)
-            break
+        if not ok:
+            continue
+        p = view.to_tcp(p_cam)
+        score = abs(p[0]) + abs(p[1])          # 중심에서 벗어난 정도
+        if best is None or score < best:
+            best, hit = score, (p_cam, f"{name}·{how}", why)
 
-    z = view.to_tcp(hit[0])[2] if hit else z_default
+    # 네모를 그릴 깊이. 가능한 블록이 있으면 그 높이, 없어도 **보이는 블록이
+    # 있으면 가장 가까운 것의 높이**를 쓴다 — 그러면 그리퍼가 내려갈 때 네모가
+    # 판을 따라 내려와 손가락 면과 어긋나 보이지 않는다. 아무것도 없을 때만
+    # 기본 거리다.
+    if hit:
+        z = view.to_tcp(hit[0])[2]
+    elif blocks:
+        zs = [view.to_tcp(b[0])[2] for b in blocks]
+        near = [t for t in zs if 0.0 < t < REACH]
+        z = min(near) if near else z_default
+    else:
+        z = z_default
     quad = view.corridor_quad(z)
     if quad is None:
         return False, None

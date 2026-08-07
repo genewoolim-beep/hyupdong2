@@ -82,8 +82,8 @@ assert hit is False and name is None
 red_only = frame.copy()
 
 frame2 = np.full((H, W, 3), (32, 28, 26), np.uint8)
-hit, name = go.draw(frame2, v, [(v.to_cam([4, -3, 160]), "빨간색")])
-assert hit is True and name == "빨간색"
+hit, name = go.draw(frame2, v, [(v.to_cam([4, -3, 160]), "빨간색", "깊이")])
+assert hit is True and name.startswith("빨간색")
 assert not np.array_equal(red_only, frame2)
 print("7 블록 없으면 빨강 / 들어오면 초록 + 파지 가능")
 
@@ -120,7 +120,7 @@ else:
     blocks = go.find_blocks(v, img, dep, det)
     assert blocks, "합성 블록을 아예 못 찾았다"
     hit, name = go.draw(img, v, blocks)
-    assert hit and name == "빨간색", (hit, name, blocks)
+    assert hit and name.startswith("빨간색"), (hit, name, blocks)
     got_z = v.to_tcp(blocks[0][0])
     assert abs(got_z[2] - 160.0) < 8.0, got_z            # 깊이로 되돌린 높이가 맞나
     print(f"8a 합성 블록 검출 {len(blocks)}개 → 초록  "
@@ -138,3 +138,21 @@ else:
     out2 = os.path.join(os.environ.get("TMPDIR", "/tmp"), "grasp_ar_synth.png")
     cv2.imwrite(out2, np.hstack([img2[380:720, 520:1180], img[380:720, 520:1180]]))
     print(f"   그림: {out2}  (왼쪽 비킴=빨강 / 오른쪽 정렬=초록)")
+
+    # (c) 깊이가 0 이어도(가까이서 센서가 죽는 구간) 크기로 거리를 메운다
+    #     실측 증상: 그리퍼가 파지 높이로 내려가면 추적이 끊기고 구역이 사라졌다.
+    img3, dep3 = synth(120.0)
+    dep3[:] = 0                                   # 깊이 전멸
+    blocks3 = go.find_blocks(v, img3, dep3, det)
+    assert blocks3, "깊이가 없으면 크기로라도 찾아야 한다"
+    p3 = v.to_tcp(blocks3[0][0])
+    assert blocks3[0][2] == "크기", blocks3[0]
+    assert abs(p3[2] - 120.0) < 20.0, p3           # 크기 추정 오차
+    hit3, name3 = go.draw(img3, v, blocks3)
+    assert hit3, p3
+    print(f"8c 깊이 0 → 크기로 추정  높이 {p3[2]:.0f}mm (넣은 값 120mm) → 초록 유지")
+
+    # (d) 깊이 영상이 아예 없어도 같다
+    blocks4 = go.find_blocks(v, img3, None, det)
+    assert blocks4 and blocks4[0][2] == "크기"
+    print("8d 깊이 토픽이 없어도 구역·판정 유지")

@@ -64,6 +64,28 @@ HAND_TASK = os.environ.get("GESTURE_TASK", os.path.join(HERE, "gesture_recognize
 GESTURE_SOURCE = os.environ.get("GESTURE_SOURCE", "v4l2").lower()
 GESTURE_CAM_TOPIC = os.environ.get("GESTURE_CAM_TOPIC", "/webcam/image_raw")
 
+# 화면을 반시계로 이만큼 돌린다 (0/90/180/270). 웹캠을 세로로 세워 달았을 때
+# 90 을 주면 사람이 똑바로 보인다.
+#
+# **인식보다 먼저 돌린다.** 다 그린 뒤 돌리면 십자선·게이지는 돌아가지만 판정은
+# 안 돌아가서, 화면에서 위로 벗어난 손이 로봇에게는 옆으로 읽힌다.
+# 순서는 회전 → 거울이다. 거울은 조작자 기준 좌우여야 하므로 똑바로 세운 뒤에
+# 뒤집어야 한다.
+GESTURE_ROTATE = int(os.environ.get("GESTURE_ROTATE", 0)) % 360
+_ROT = {90: cv2.ROTATE_90_COUNTERCLOCKWISE, 180: cv2.ROTATE_180,
+        270: cv2.ROTATE_90_CLOCKWISE}
+
+
+def orient(frame):
+    """카메라 프레임을 사람이 보는 방향으로 세우고 거울로 만든다.
+
+    조종 창(teleop_mode)과 단독 실행이 **같은 함수**를 쓴다 — 한쪽만 돌리면
+    두 화면에서 같은 손짓이 다른 뜻이 된다.
+    """
+    if GESTURE_ROTATE in _ROT:
+        frame = cv2.rotate(frame, _ROT[GESTURE_ROTATE])
+    return cv2.flip(frame, 1)
+
 # ───────────────────────── signbot_admin 연동 ─────────────────────────
 # --admin 을 붙였을 때만 대시보드로 모드 상태를 보낸다. sign_demo.py/block_sort.py 와
 # 같은 패턴(ADMIN_URL, "--admin" in sys.argv) 이다.
@@ -267,12 +289,41 @@ Z_DEADBAND = 0.03
 RETURN_HOLD_SEC = 3.0
 
 # xy 조이스틱 영역: 화면(카메라 프레임) 왼쪽에 놓인 원 두 개.
-# 중심(ROI_CX, ROI_CY)은 프레임 비율(0~1) 기준. 반지름(ROI_R)은 세로 기준 비율이고,
-# 가로는 프레임 종횡비만큼 보정해서 실제 화면에 정원(正圓)으로 그려지고 계산된다.
-# 안쪽 데드존 반지름은 바깥 원의 절반이다.
-ROI_CX, ROI_CY = 0.22, 0.62   # 화면 왼쪽 아래 — 손을 너무 높이 들지 않아도 되게
-ROI_R = 0.25
+# 중심(ROI_CX, ROI_CY)은 프레임 비율(0~1) 기준.
+#
+# 반지름(ROI_R)은 **짧은 변** 기준 비율이다. 가로 기준으로 하면 세로 화면
+# (GESTURE_ROTATE=90) 에서 십자선이 화면 밖으로 나가고, 세로 기준으로 하면
+# 가로 화면에서 같은 일이 생긴다. 짧은 변에 매어 두면 어느 방향이든 크기가
+# 그대로다. 가로 화면에서는 짧은 변이 곧 높이라 예전과 값이 같다.
+# 판정(process)과 그리기(draw_roi)가 **같은 단위**를 써야 한다 — 다르면 화면의
+# 정지 사각형과 실제로 멈추는 구역이 어긋난다.
+ROI_CX, ROI_CY = (float(os.environ.get("GESTURE_ROI_CX", 0.22)),
+                  float(os.environ.get("GESTURE_ROI_CY", 0.62)))
+ROI_R = float(os.environ.get("GESTURE_ROI_R", 0.25))
 DEADZONE_R = ROI_R * 0.5
+
+
+def unit(frame_or_shape):
+    """길이의 기준이 되는 짧은 변(픽셀)."""
+    h, w = (frame_or_shape.shape[:2] if hasattr(frame_or_shape, "shape")
+            else frame_or_shape[:2])
+    return float(min(h, w))
+
+
+def roi_center(frame):
+    """십자선 중심(픽셀). 화면 밖으로 나가지 않게 안쪽으로 물린다.
+
+    ROI_CX/CY 를 비율 그대로 쓰면 세로 화면(GESTURE_ROTATE=90)에서 십자선 팔이
+    화면을 넘어간다 — 실측: 720 폭에서 중심 158px, 팔 180px.
+    **판정(process)과 그리기(draw_roi)가 이 함수 하나를 써야 한다.** 각자 계산하면
+    화면의 정지 사각형과 실제로 멈추는 자리가 어긋나고, 그러면 사람은 멈춘 줄
+    알고 손을 두는데 팔은 계속 간다.
+    """
+    h, w = frame.shape[:2]
+    arm = ROI_R * unit(frame) + 8.0        # 8px 은 화살촉·글자 여유
+    cx = min(max(ROI_CX * w, arm), w - arm)
+    cy = min(max(ROI_CY * h, arm), h - arm)
+    return cx, cy
 
 KEY_HELP = [
     ("Q", "종료"),
@@ -350,11 +401,15 @@ class HandController:
 
             if label == "Right":  # 실제 왼손 (핸드니스 반전, 모듈 docstring 참고)
                 left_open = top_name == "Open_Palm"
-                # 검지 끝 좌표를 원 중심 기준 오프셋으로. 손목보다 검지 끝을 기준으로
-                # 하면 손목을 꺾지 않고 손가락만 살짝 뻗어도 조작이 되어 훨씬 편하다.
-                # 가로는 종횡비로 보정해서 프레임이 16:9 라도 정원(正圓)으로 계산된다.
-                dx = (lm[INDEX_TIP].x - ROI_CX) * (w / h)
-                dy = (lm[INDEX_TIP].y - ROI_CY)
+                # 검지 끝 좌표를 십자선 중심 기준 오프셋으로. 손목보다 검지 끝을
+                # 기준으로 하면 손목을 꺾지 않고 손가락만 살짝 뻗어도 조작이 되어
+                # 훨씬 편하다.
+                # 두 축 모두 **짧은 변**으로 나눈다(unit). 그래야 가로·세로 어느
+                # 화면에서든 데드존이 정사각이고, 그리기(draw_roi)와 같은 단위가 된다.
+                s = unit(frame)
+                rcx, rcy = roi_center(frame)
+                dx = (lm[INDEX_TIP].x * w - rcx) / s
+                dy = (lm[INDEX_TIP].y * h - rcy) / s
                 dist = float(np.hypot(dx, dy))
                 if dist < DEADZONE_R:
                     v = np.zeros(2)                          # 데드존 — 움직임 없음(속도 0)
@@ -497,11 +552,13 @@ def draw_roi(frame):
     속도를 안 바꾼다. 원(조이스틱)으로 그리면 "멀리 갈수록 빠르다" 로 읽혀
     실제 동작과 어긋나므로 십자로 바꿨다.
 
-    ROI_R/DEADZONE_R 은 세로 기준 비율이라 픽셀 길이는 h 를 곱하면 된다.
+    ROI_R/DEADZONE_R 은 **짧은 변** 기준 비율이다(unit). 판정(process)과 같은
+    단위여야 화면의 정지 사각형과 실제로 멈추는 구역이 일치한다.
     """
-    h, w = frame.shape[:2]
-    cx, cy = int(ROI_CX * w), int(ROI_CY * h)
-    arm, dead = int(ROI_R * h), int(DEADZONE_R * h)
+    s = unit(frame)
+    rcx, rcy = roi_center(frame)
+    cx, cy = int(rcx), int(rcy)
+    arm, dead = int(ROI_R * s), int(DEADZONE_R * s)
     C, D = (0, 200, 255), (0, 140, 255)
 
     # 십자 축
@@ -523,11 +580,14 @@ def draw_roi(frame):
     #            **실제로 보내는 값(Y_SIGN)에서 뽑는다.**
     # 축 글자를 손으로 박아두면 매핑을 바꿨을 때 화면만 옛말을 한다 — 조종에서
     # 화면이 거짓말하면 사람이 반대로 밀고, 그건 팔이 엉뚱한 쪽으로 가는 것이다.
+    # 글자 자리는 화면 안으로 물린다. 세로 화면에서는 왼쪽 글자가 밖으로 밀려
+    # 사라졌다(실측: 중심 188px, 팔 180px → 글자 x 가 -52).
+    h, w = frame.shape[:2]
     right_ax, left_ax = ("+Y", "-Y") if Y_SIGN < 0 else ("-Y", "+Y")
-    for txt, org in (("FWD +X", (cx - 30, cy - arm - 12)),
-                     ("BACK -X", (cx - 34, cy + arm + 22)),
-                     (f"L {left_ax}", (cx - arm - 60, cy + 5)),
-                     (f"R {right_ax}", (cx + arm + 10, cy + 5))):
+    for txt, org in (("FWD +X", (cx - 30, max(cy - arm - 12, 14))),
+                     ("BACK -X", (cx - 34, min(cy + arm + 22, h - 6))),
+                     (f"L {left_ax}", (max(cx - arm - 60, 4), cy + 5)),
+                     (f"R {right_ax}", (min(cx + arm + 10, w - 66), cy + 5))):
         cv2.putText(frame, txt, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, C, 1, cv2.LINE_AA)
     cv2.putText(frame, "STOP", (cx - 20, cy - dead - 6),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, D, 1, cv2.LINE_AA)
@@ -555,7 +615,7 @@ def draw_gauge(frame, z):
     h, w = frame.shape[:2]
     cx = int(GAUGE_CX * w)
     y0, y1 = int(GAUGE_Y0 * h), int(GAUGE_Y1 * h)
-    half_w = int(GAUGE_HALF_W * h)
+    half_w = int(GAUGE_HALF_W * unit(frame))
     x0, x1 = cx - half_w, cx + half_w
     ymid = (y0 + y1) // 2
     dead_px = int(Z_DEADZONE * (y1 - y0))
@@ -644,7 +704,7 @@ def run_session():
         ok, frame = cap.read()
         if not ok:
             break
-        frame = cv2.flip(frame, 1)
+        frame = orient(frame)          # 회전(세로 세우기) → 거울
 
         now = time.time()
         dt = now - t_prev

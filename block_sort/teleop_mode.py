@@ -102,7 +102,7 @@ def run(cap, dsr, gripper, on_frame=None, should_stop=None,
                 time.sleep(0.02)
                 continue
             blank = 0
-            frame = cv2.flip(frame, 1)
+            frame = hg.orient(frame)     # 회전(세로 세우기) → 거울
 
             now = time.time()
             dt = now - t_prev
