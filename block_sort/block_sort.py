@@ -169,6 +169,31 @@ APPROACH_Z = float(os.environ.get("APPROACH_Z", 120.0))
 # 보여 멀쩡한 블록을 거부했다(실측 2026-08-07: 초록을 못 집었다).
 SELF_R = float(os.environ.get("SELF_R", 30.0))
 
+
+def reach_box():
+    """팔을 보내도 되는 xy 범위 (x0, x1, y0, y1). 모르면 None.
+
+    이웃을 치울 자리가 **판 밖이면 안 된다.** 그런데 block_sort 에는 판 경계가
+    없었다 — 구역 좌표만 있고, 그 바깥이 어디까지인지는 적힌 데가 없다.
+    유일하게 **실측된** 경계는 조종 쪽 교시 상자다(teach_box.py 로 두 모서리를
+    찍어 teleop_box.env 에 저장, robot_teleop 이 같은 목적으로 쓴다).
+    같은 로봇·같은 판이므로 그것을 빌린다 — 새로 교시하면 양쪽이 함께 따라온다.
+
+    없으면 None 을 돌려주고, 부르는 쪽은 **구역 좌표에서 만든 상자**로 물러난다.
+    """
+    try:
+        gd = os.path.join(os.path.dirname(HERE), "hand_gesture_control")
+        if gd not in sys.path:
+            sys.path.insert(0, gd)
+        import robot_teleop as rt
+        # **교시 원본**(X_MIN…)을 쓴다. TX_MIN 은 거기서 15mm 물린 값인데, 그
+        # 여유는 '속도 지령이 미끄러지는 것' 을 위한 조종 쪽 몫이다. 여기서 쓰면
+        # 판 위 구역까지 밖으로 판정된다 — 실측: 인간구역 y −229 가 TY_MIN(−216)
+        # 밖이다. 원본(−231)은 구역 전부를 덮는다.
+        return rt.X_MIN, rt.X_MAX, rt.Y_MIN, rt.Y_MAX
+    except Exception:
+        return None
+
 # 옆 블록을 피하려고 손목을 돌릴지 볼 때, 이 반경 안의 블록만 본다(mm).
 # 더 멀면 손가락 근처에 오지 않는다 — 개구 절반(약 55) + 블록 한 변이면 넉넉하다.
 NEIGHBOR_R = float(os.environ.get("NEIGHBOR_R", 95.0))
@@ -1349,19 +1374,24 @@ class BlockSort(Node):
         R = np.array([[np.cos(r), -np.sin(r)], [np.sin(r), np.cos(r)]])
         return np.array(OFFSET_BASE) + R @ np.array(OFFSET_TOOL)
 
-    def neighbors_xy(self, target_xy, radius=None):
+    def neighbors_xy(self, target_xy, radius=None, self_r=None):
         """지금 시야에서 target 주변에 있는 **다른** 블록들의 중심 (base xy).
 
         색을 전부 물어본다. 팔이 멈춰 있으므로 검출 노드가 촬영 한 번을 6색이
         나눠 쓴다(프레임 캐시가 자세 기준이라 그렇다 — 실측 6색 2.07초).
         """
         radius = NEIGHBOR_R if radius is None else radius
+        # self_r 은 '자기 자신' 으로 볼 반경이다. **빈 자리를 검사할 때는 0 을 준다** —
+        # 그 자리엔 자기 자신이 없으므로, 기본값(SELF_R=30mm)을 그대로 쓰면 30mm
+        # 안의 진짜 블록을 자기 자신으로 착각해 '비었다' 고 답한다.
+        # 그 위에 블록을 내려놓게 되는 자리다(relocate_blocker 의 목적지 검사).
+        self_r = SELF_R if self_r is None else self_r
         out = []
         for color in KNOWN_COLORS:
             for det in self._detect_all(color, quiet=True):
                 p = det["pose"]
                 d = float(np.hypot(p[0] - target_xy[0], p[1] - target_xy[1]))
-                if d < SELF_R:
+                if d < self_r:
                     continue                  # 자기 자신 (블록은 이보다 붙을 수 없다)
                 if d <= radius:
                     out.append((p[0], p[1], color))
@@ -1472,7 +1502,28 @@ class BlockSort(Node):
         dest = relocate_step(target_xy, bxy, axis_deg)
         if dest is None:
             return False
-        blocked = [n for n in self.neighbors_xy(dest, radius=BLOCK_MM + FINGER_GAP_MIN)
+        # **판 밖으로 보내지 않는다.** 팀원이 남긴 미해결 항목이다 — 목적지가
+        # 다른 블록과 겹치는지는 봤지만 판 경계는 아무도 안 봤다.
+        # 경계는 조종 쪽 교시 상자를 빌린다(reach_box). 그것도 없으면 구역
+        # 좌표를 감싸는 상자에 여유를 준 것으로 물러난다.
+        box = reach_box()
+        if box is None:
+            xs = [p[0] for p in self.all_zone_xy()]
+            ys = [p[1] for p in self.all_zone_xy()]
+            m = ZONE_RADIUS + BLOCK_MM
+            box = (min(xs) - m, max(xs) + m, min(ys) - m, max(ys) + m)
+        x0, x1, y0, y1 = box
+        if not (x0 <= dest[0] <= x1 and y0 <= dest[1] <= y1):
+            self.get_logger().warn(
+                f"옮길 자리({dest[0]:.0f},{dest[1]:.0f})가 "
+                f"판 범위(x {x0:.0f}~{x1:.0f}, y {y0:.0f}~{y1:.0f}) 밖이라 포기합니다")
+            push_debug("warn", "파지", "이웃을 치울 자리가 판 밖이라 포기했습니다")
+            return False
+        # **self_r=0.** 빈 자리를 보는 것이라 '자기 자신' 이 없다. 기본값을 쓰면
+        # 30mm 안의 블록을 자기 자신으로 착각해 그 위에 내려놓는다.
+        # 옮길 블록 자신(bxy)만 뺀다 — 그건 곧 자리를 비울 것이다.
+        blocked = [n for n in self.neighbors_xy(dest, radius=BLOCK_MM + FINGER_GAP_MIN,
+                                                self_r=0.0)
                   if np.hypot(n[0] - bxy[0], n[1] - bxy[1]) > 5.0]
         if blocked:
             self.get_logger().warn(
