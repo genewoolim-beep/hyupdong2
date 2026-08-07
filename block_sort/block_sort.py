@@ -160,6 +160,13 @@ TRANSIT_Z = float(os.environ.get("TRANSIT_Z", 250.0))
 # 이송(TRANSIT_Z=250)과 달리 물린 블록이 없어 여유가 덜 필요하다.
 APPROACH_Z = float(os.environ.get("APPROACH_Z", 120.0))
 
+# 이 거리 안에 잡힌 것은 **자기 자신**으로 본다(mm).
+# 35mm 블록 둘은 중심이 35mm 보다 가까울 수 없다 — 그보다 가깝게 잡혔다면 같은
+# 블록을 다시 본 것이다(검출 흔들림). 이 값을 10mm 로 두었더니 흔들림이 그것을
+# 넘는 순간 자기 자신을 옆 블록으로 세어 **틈이 음수**가 되고, 두 축 다 막힌 것으로
+# 보여 멀쩡한 블록을 거부했다(실측 2026-08-07: 초록을 못 집었다).
+SELF_R = float(os.environ.get("SELF_R", 30.0))
+
 # 옆 블록을 피하려고 손목을 돌릴지 볼 때, 이 반경 안의 블록만 본다(mm).
 # 더 멀면 손가락 근처에 오지 않는다 — 개구 절반(약 55) + 블록 한 변이면 넉넉하다.
 NEIGHBOR_R = float(os.environ.get("NEIGHBOR_R", 95.0))
@@ -1319,8 +1326,8 @@ class BlockSort(Node):
             for det in self._detect_all(color, quiet=True):
                 p = det["pose"]
                 d = float(np.hypot(p[0] - target_xy[0], p[1] - target_xy[1]))
-                if d < 10.0:
-                    continue                  # 자기 자신
+                if d < SELF_R:
+                    continue                  # 자기 자신 (블록은 이보다 붙을 수 없다)
                 if d <= radius:
                     out.append((p[0], p[1], color))
         return out
