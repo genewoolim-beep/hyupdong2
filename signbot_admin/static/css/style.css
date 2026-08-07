@@ -124,6 +124,11 @@ body {
    .video-feed 규칙이 이미 영상에 맡기고 있다. */
 .gesture-cam-panel .video-feed { max-width: 480px; width: 100%; margin: 0 auto; }
 
+/* 로봇 시점은 세로로 길어(720x1280) 패널 폭을 다 쓰면 화면 아래로 넘친다.
+   폭을 75% 로 줄인다 — 영상이 그 폭을 꽉 채우므로 옆에 검은 여백은 안 생긴다.
+   더 줄이거나 키우려면 이 숫자 하나만 만진다. */
+.camera-panel .video-feed { width: 75%; max-width: 75%; margin: 0 auto; }
+
 /* ---------- Mode banner (제어 화면) ---------- */
 .mode-banner {
   align-items: center;

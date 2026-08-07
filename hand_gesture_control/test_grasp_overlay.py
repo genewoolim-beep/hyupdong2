@@ -210,3 +210,26 @@ else:
     out2 = os.path.join(os.environ.get("TMPDIR", "/tmp"), "grasp_ar_rot90.png")
     cv2.imwrite(out2, out)
     print(f"   그림: {out2}")
+
+    # ── 11. 좌우반전까지 걸어도 AR 이 제자리에 (글자는 뒤집히지 않는다) ──
+    #     조종자가 로봇을 마주보므로 로봇 시점을 뒤집어 보낸다. 다 그린 뒤
+    #     뒤집으면 "파지 가능" 이 거울 글자가 되어 못 읽는다.
+    img8, dep8 = synth(150.0, x_tcp=15.0)      # 살짝 옆으로 — 반전이 보이게
+    out8, hit8, _ = go.render(img8, v, go.find_blocks(v, img8, dep8, det),
+                              depth=dep8, rotate=90, mirror=True)
+    assert hit8
+    uv8 = v.project(v.to_cam([15.0, 0.0, 150.0]))
+    mx8, my8 = go._xy_map(90, True, img8.shape)(*uv8)
+    r8 = np.argwhere((out8[:, :, 2] > 150) & (out8[:, :, 1] < 100))
+    dx8, dy8 = abs(r8[:, 1].mean() - mx8), abs(r8[:, 0].mean() - my8)
+    assert dx8 < 12 and dy8 < 12, (dx8, dy8, (mx8, my8))
+
+    #     반전이 실제로 걸렸는가: 반전 없이 그린 것과 x 가 좌우로 갈려야 한다
+    mx_no, _ = go._xy_map(90, False, img8.shape)(*uv8)
+    assert abs((out8.shape[1] - 1 - mx_no) - mx8) < 1e-6, (mx_no, mx8)
+    print(f"11 좌우반전 렌더  블록 중심 오차 ({dx8:.0f},{dy8:.0f})px  "
+          f"반전 전 x {mx_no:.0f} → 후 {mx8:.0f}")
+
+    out3 = os.path.join(os.environ.get("TMPDIR", "/tmp"), "grasp_ar_mirror.png")
+    cv2.imwrite(out3, out8)
+    print(f"   그림: {out3}")

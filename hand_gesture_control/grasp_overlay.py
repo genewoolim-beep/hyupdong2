@@ -342,28 +342,51 @@ def _rot_map(rotate, src_shape):
     return lambda u, v: (u, v)
 
 
+def _xy_map(rotate, mirror, src_shape):
+    """소스 픽셀 → **돌리고 뒤집은** 영상의 픽셀.
+
+    거울은 돌린 **뒤에** 건다 — 보는 사람이 말하는 '좌우반전' 은 화면에 보이는
+    그림의 좌우이지 소스의 좌우가 아니다.
+    """
+    h, w = src_shape[:2]
+    base = _rot_map(rotate, src_shape)
+    if not mirror:
+        return base
+    w_out = h if rotate in (90, 270) else w      # 돌린 뒤의 가로 크기
+
+    def flipped(u, v):
+        x, y = base(u, v)
+        return (w_out - 1 - x, y)
+    return flipped
+
+
 _ROT = {}
 
 
-def render(frame, view, blocks, depth=None, rotate=0, z_default=200.0):
-    """AR 을 겹치고 화면을 rotate 만큼 돌려서 돌려준다. (돌린 프레임, 초록인가, 대상)
+def render(frame, view, blocks, depth=None, rotate=0, mirror=False, z_default=200.0):
+    """AR 을 겹치고 화면을 돌리고 뒤집어 돌려준다. (바뀐 프레임, 초록인가, 대상)
 
-    **기하는 소스 방향에서 계산하고, 그리기만 돌린 좌표에서 한다.**
-    다 그린 뒤 영상을 돌리면 "파지 가능" 글자까지 같이 눕는다. 반대로 영상을
-    먼저 돌리고 기하를 다시 풀면 내부파라미터와 깊이 영상까지 돌려야 해서
-    검증된 계산이 통째로 흔들린다. 그래서 **점만 옮긴다**(_rot_map).
+    **기하는 소스 방향에서 계산하고, 그리기만 바뀐 좌표에서 한다.**
+    다 그린 뒤 영상을 돌리거나 뒤집으면 "파지 가능" 글자까지 눕거나 거울이 된다 —
+    거울 글자는 못 읽는다. 반대로 영상을 먼저 바꾸고 기하를 다시 풀면
+    내부파라미터와 깊이 영상까지 함께 바꿔야 해서 검증된 계산이 통째로 흔들린다.
+    그래서 **점만 옮긴다**(_xy_map).
     """
     import cv2
     if not _ROT:
         _ROT.update({90: cv2.ROTATE_90_COUNTERCLOCKWISE, 180: cv2.ROTATE_180,
                      270: cv2.ROTATE_90_CLOCKWISE})
     rotate = int(rotate) % 360
-    if rotate not in _ROT:
-        hit, name = draw(frame, view, blocks, depth, z_default)
-        return frame, hit, name
-    out = cv2.rotate(frame, _ROT[rotate])
+    out = frame
+    if rotate in _ROT:
+        out = cv2.rotate(out, _ROT[rotate])
+    if mirror:
+        out = cv2.flip(out, 1)
+    if rotate not in _ROT and not mirror:
+        hit, name = draw(out, view, blocks, depth, z_default)
+        return out, hit, name
     hit, name = draw(out, view, blocks, depth, z_default,
-                     xy=_rot_map(rotate, frame.shape))
+                     xy=_xy_map(rotate, mirror, frame.shape))
     return out, hit, name
 
 

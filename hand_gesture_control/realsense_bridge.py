@@ -61,6 +61,13 @@ USE_AR = os.environ.get("GRASP_AR", "1") != "0"
 # 판을 내려다보는 시야가 세로로 길어 그쪽이 보기 낫다.
 # AR 은 돌린 좌표에 그린다(grasp_overlay.render) — 다 그린 뒤 돌리면 글자도 눕는다.
 REALSENSE_ROTATE = int(os.environ.get("REALSENSE_ROTATE", 90)) % 360
+
+# 로봇 시점을 좌우로 뒤집어 보낸다. **기본이 켜짐이다.**
+# 조종자가 로봇을 마주보고 서기 때문이다 — 내 오른쪽이 로봇 카메라에는 왼쪽으로
+# 잡힌다. 뒤집어 놓으면 화면에서 오른쪽으로 보이는 것이 내 오른쪽이 되어,
+# 손을 어느 쪽으로 밀어야 하는지 헷갈리지 않는다(조작 방향은 TELEOP_FACE_ROBOT).
+# 거울은 **돌린 뒤에** 걸고, AR 글자는 뒤집히지 않는다(grasp_overlay.render).
+REALSENSE_MIRROR = os.environ.get("REALSENSE_MIRROR", "1") != "0"
 AR_INTERVAL = 1.0 / float(os.environ.get("GRASP_AR_HZ", 5))
 
 # 손가락 링크 이름. 벌어진 폭을 여기서 읽는다 — 모드버스로 물어보면 컨트롤러의
@@ -101,7 +108,8 @@ class RealsenseBridge(Node):
             self._tf = self._make_tf()
             self.get_logger().info(
                 f"파지 지점 AR 켜짐 — 깊이 {DEPTH_TOPIC}, 손가락 {FINGER_FRAMES[0]}/"
-                f"{FINGER_FRAMES[1]} ({int(1/AR_INTERVAL)}Hz 검출, 화면 회전 {REALSENSE_ROTATE}°)")
+                f"{FINGER_FRAMES[1]} ({int(1/AR_INTERVAL)}Hz 검출, 화면 회전 {REALSENSE_ROTATE}°"
+                f"{', 좌우반전' if REALSENSE_MIRROR else ''})")
 
         threading.Thread(target=self._sender_loop, daemon=True).start()
         self.get_logger().info(f"{TOPIC} 구독 → {ADMIN_URL}/api/frame/realsense 전송 시작")
@@ -177,15 +185,17 @@ class RealsenseBridge(Node):
         with self._lock:
             depth_now = None if self._depth is None else self._depth
         out, _hit, _name = self.go.render(frame, self.view, self._blocks,
-                                          depth=depth_now, rotate=REALSENSE_ROTATE)
+                                          depth=depth_now, rotate=REALSENSE_ROTATE,
+                                          mirror=REALSENSE_MIRROR)
         return out
 
     @staticmethod
     def _rotate_only(frame):
-        """AR 을 못 그릴 때도 화면 방향은 맞춘다."""
+        """AR 을 못 그릴 때도 화면 방향은 맞춘다 (회전 + 좌우반전)."""
         flag = {90: cv2.ROTATE_90_COUNTERCLOCKWISE, 180: cv2.ROTATE_180,
                 270: cv2.ROTATE_90_CLOCKWISE}.get(REALSENSE_ROTATE)
-        return frame if flag is None else cv2.rotate(frame, flag)
+        out = frame if flag is None else cv2.rotate(frame, flag)
+        return cv2.flip(out, 1) if REALSENSE_MIRROR else out
 
     def _sender_loop(self):
         while rclpy.ok():
