@@ -26,7 +26,7 @@ assert turn == 0.0
 print("1 옆 블록 없음 → 회전 없음")
 
 # ── 2. x 축(0°)에 딱 붙은 블록: x 로는 못 물고 y 로는 물 수 있다 ──
-#     중심거리 40mm → 표면 틈 5mm. 손가락(10mm)이 안 들어간다.
+#     중심거리 40mm → 표면 틈 5mm. 손가락(FINGER_T)이 안 들어간다.
 nb = [(440.0, 0.0)]
 gx = approach_gap(T, 0.0, nb)
 gy = approach_gap(T, 90.0, nb)
@@ -36,11 +36,16 @@ turn, g, g_before = best_axis(T, 0.0, nb)
 assert turn == 90.0, (turn, g, g_before)
 print(f"2 x 축 40mm 옆에 블록 → 틈 {gx:.0f}mm (손가락 {FINGER_T:.0f}mm 못 들어감) "
       f"→ 90° 회전, 틈 무한")
+print(f"   ※ 필요한 최소 중심거리 = 블록 {BLOCK_MM:.0f} + 손가락 {FINGER_T:.0f} "
+      f"= {BLOCK_MM + FINGER_T:.0f}mm")
 
-# ── 3. 이미 넉넉하면 돌리지 않는다 (중심거리 60mm → 틈 25mm) ──
-turn, g, _ = best_axis(T, 0.0, [(460.0, 0.0)])
-assert turn == 0.0 and g == 25.0, (turn, g)
-print("3 틈 25mm → 넉넉하니 회전 없음")
+# ── 3. 이미 넉넉하면 돌리지 않는다 ──
+#     **문턱 숫자를 박지 않는다.** FINGER_T 는 실측으로 바뀌는 값이고(10 → 27),
+#     시험이 그 숫자에 묶이면 값을 고칠 때마다 엉뚱하게 깨진다.
+roomy = BLOCK_MM + FINGER_T + 15.0          # 넉넉한 중심거리
+turn, g, _ = best_axis(T, 0.0, [(T[0] + roomy, T[1])])
+assert turn == 0.0 and abs(g - (FINGER_T + 15.0)) < 1e-6, (turn, g)
+print(f"3 틈 {g:.0f}mm (문턱 {FINGER_T:.0f}mm) → 넉넉하니 회전 없음")
 
 # ── 4. 옆으로 비킨 블록은 무시한다 (손가락이 그 옆을 지난다) ──
 far = [(440.0, LANE_HALF + 1.0)]

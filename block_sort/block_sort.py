@@ -167,7 +167,7 @@ NEIGHBOR_R = float(os.environ.get("NEIGHBOR_R", 95.0))
 # **손가락 한 개** 두께다 — 틈 하나에 손가락 하나가 들어가고, 반대쪽 손가락은
 # 반대쪽 틈으로 내려간다. 양쪽을 함께 보는 일은 approach_gap 의 min 이 한다.
 # block_geom.FINGER_T 와 같은 뜻이다.
-FINGER_GAP_MIN = float(os.environ.get("FINGER_GAP_MIN", 10.0))
+FINGER_GAP_MIN = float(os.environ.get("FINGER_GAP_MIN", 27.0))
 # 두 축 다 이보다 좁으면 **집지 않는다.**
 # 처음엔 '그래도 넓은 쪽으로 간다' 로 두었는데(포기하면 그 칸을 못 만드니까),
 # 실제로는 그대로 옆 블록을 치고 오류로 멎었다(실측 2026-08-07). 칠 것을 알면서
