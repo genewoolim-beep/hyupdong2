@@ -163,7 +163,9 @@ APPROACH_Z = float(os.environ.get("APPROACH_Z", 120.0))
 # 옆 블록을 피하려고 손목을 돌릴지 볼 때, 이 반경 안의 블록만 본다(mm).
 # 더 멀면 손가락 근처에 오지 않는다 — 개구 절반(약 55) + 블록 한 변이면 넉넉하다.
 NEIGHBOR_R = float(os.environ.get("NEIGHBOR_R", 95.0))
-# 손가락이 들어가려면 블록 사이에 이만큼은 있어야 한다(mm).
+# 블록 사이 틈에 손가락이 들어가려면 이만큼은 있어야 한다(mm).
+# **손가락 한 개** 두께다 — 틈 하나에 손가락 하나가 들어가고, 반대쪽 손가락은
+# 반대쪽 틈으로 내려간다. 양쪽을 함께 보는 일은 approach_gap 의 min 이 한다.
 # block_geom.FINGER_T 와 같은 뜻이다.
 FINGER_GAP_MIN = float(os.environ.get("FINGER_GAP_MIN", 10.0))
 # 두 축 다 이보다 좁으면 **집지 않는다.**
