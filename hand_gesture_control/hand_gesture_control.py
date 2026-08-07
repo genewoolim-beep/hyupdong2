@@ -77,13 +77,33 @@ GESTURE_ROTATE = int(os.environ.get("GESTURE_ROTATE", 90)) % 360
 _ROT = {90: cv2.ROTATE_90_COUNTERCLOCKWISE, 180: cv2.ROTATE_180,
         270: cv2.ROTATE_90_CLOCKWISE}
 
+# 긴 변에서 가운데 이만큼만 남긴다 (1.0 이면 자르지 않음).
+#
+# 이 웹캠의 최대는 1280x720 이고 **16:9 라 너무 길다**. 세로로 세우면
+# 720x1280 이 되어 더 두드러진다. 카메라 쪽 해상도를 4:3(640x480)으로 바꾸면
+# 되지만, 웹캠 토픽은 **수어 인식과 공유**한다 — 거기 해상도를 건드리면 학습된
+# 인식기까지 영향을 받는다. 그래서 조종 쪽에서만 잘라낸다.
+# 0.75 → 1280 에서 960 만 남겨 4:3 이 되고, 세로로 세우면 720x960 (3:4) 이다.
+# 덤으로 손이 화면에서 커져 인식에도 낫다. 대신 좌우 시야를 잃으므로 손을
+# 넓게 벌리면 화면을 벗어난다 — 그때 1.0 으로 되돌린다.
+GESTURE_CROP = float(os.environ.get("GESTURE_CROP", 0.75))
+
 
 def orient(frame):
     """카메라 프레임을 사람이 보는 방향으로 세우고 거울로 만든다.
 
+    순서는 **자르기 → 회전 → 거울**이다.
+    · 자르기는 원본 가로(긴 변) 기준이라 회전 전에 해야 뜻이 분명하다.
+    · 거울은 조작자 기준 좌우여야 하므로 똑바로 세운 뒤에 뒤집는다.
+
     조종 창(teleop_mode)과 단독 실행이 **같은 함수**를 쓴다 — 한쪽만 돌리면
     두 화면에서 같은 손짓이 다른 뜻이 된다.
     """
+    if 0.2 <= GESTURE_CROP < 1.0:
+        w = frame.shape[1]
+        keep = int(w * GESTURE_CROP)
+        x0 = (w - keep) // 2
+        frame = frame[:, x0:x0 + keep]
     if GESTURE_ROTATE in _ROT:
         frame = cv2.rotate(frame, _ROT[GESTURE_ROTATE])
     return cv2.flip(frame, 1)
