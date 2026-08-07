@@ -56,7 +56,7 @@ if [[ "${1:-}" == "--list" ]]; then
         "  gui        브라우저로 대시보드 열기   ← admin 필요" \
         "  sign       작업모드 + 제어모드 ('모드변경' 서명 시 조종) [로봇 움직임]" \
         "             ← webcam detect admin" \
-        "  bridge     로봇 시점을 제어 화면으로 중계            ← realsense admin"
+        "  bridge     로봇 시점 중계 + 파지 지점 AR            ← realsense admin"
     exit 0
 fi
 
