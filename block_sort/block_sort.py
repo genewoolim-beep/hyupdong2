@@ -163,9 +163,15 @@ APPROACH_Z = float(os.environ.get("APPROACH_Z", 120.0))
 # 옆 블록을 피하려고 손목을 돌릴지 볼 때, 이 반경 안의 블록만 본다(mm).
 # 더 멀면 손가락 근처에 오지 않는다 — 개구 절반(약 55) + 블록 한 변이면 넉넉하다.
 NEIGHBOR_R = float(os.environ.get("NEIGHBOR_R", 95.0))
-# 손가락이 들어가려면 블록 사이에 이만큼은 있어야 한다(mm). 이보다 좁으면
-# 돌려도 안 풀리므로 크게 경고한다. block_geom.FINGER_T 와 같은 뜻이다.
+# 손가락이 들어가려면 블록 사이에 이만큼은 있어야 한다(mm).
+# block_geom.FINGER_T 와 같은 뜻이다.
 FINGER_GAP_MIN = float(os.environ.get("FINGER_GAP_MIN", 10.0))
+# 두 축 다 이보다 좁으면 **집지 않는다.**
+# 처음엔 '그래도 넓은 쪽으로 간다' 로 두었는데(포기하면 그 칸을 못 만드니까),
+# 실제로는 그대로 옆 블록을 치고 오류로 멎었다(실측 2026-08-07). 칠 것을 알면서
+# 내려가는 것보다, 멈추고 사람에게 치우라고 하는 편이 낫다.
+# 1 이면 예전처럼 그래도 집는다.
+PICK_WHEN_TIGHT = os.environ.get("PICK_WHEN_TIGHT", "0") != "0"
 # 0 이면 이 기능을 끈다(예전처럼 검출 각도대로만 물린다).
 AVOID_NEIGHBORS = os.environ.get("AVOID_NEIGHBORS", "1") != "0"
 
@@ -1326,6 +1332,9 @@ class BlockSort(Node):
         물는 면이 옆면에서 옆면으로 바뀔 뿐이다. 그래서 여유가 넓은 쪽을 고르면
         잃는 것이 없다.
 
+        두 축 다 좁으면 **None 을 돌려 파지를 접는다** — 칠 것을 알면서 내려가는
+        것보다 멈추고 사람에게 치우라고 하는 편이 낫다(PICK_WHEN_TIGHT 로 바꿀 수 있다).
+
         판단은 block_geom.best_axis 가 한다(로봇 없이 시험된다 — test_avoid.py).
         여기서는 **좌표를 모아 주고, 고른 결과를 자세와 last_rot 에 반영**한다.
         last_rot 을 같이 돌려야 파지 보정(grasp_offset)이 함께 돌아간다 —
@@ -1334,6 +1343,11 @@ class BlockSort(Node):
         if not AVOID_NEIGHBORS:
             return pose
         nb = self.neighbors_xy((pose[0], pose[1]))
+        # **없어도 찍는다.** 조용히 지나가면 "옆 블록이 없다고 본 것" 과 "이 기능이
+        # 안 돌고 있는 것" 을 구별할 수 없다 — 실측 2026-08-07 에 그걸로 헤맸다.
+        self.get_logger().info(
+            f"옆 블록 살핌 (반경 {NEIGHBOR_R:.0f}mm): "
+            + (", ".join(f"{c}({x:.0f},{y:.0f})" for x, y, c in nb) if nb else "없음"))
         if not nb:
             return pose
         axis = tool_yaw(pose[3:])          # 손가락이 닫히는 축의 base 방위
@@ -1341,7 +1355,7 @@ class BlockSort(Node):
                                     [(x, y) for x, y, _c in nb])
         near = ", ".join(f"{c}({x:.0f},{y:.0f})" for x, y, c in nb)
 
-        def mm(v):
+        def mm(v):   # noqa: E306
             """무한(방해 없음)을 '충분' 으로 읽히게. 'infmm' 은 로그에서 읽기 어렵다."""
             return "충분" if v == float("inf") else f"{v:.0f}mm"
 
@@ -1356,13 +1370,17 @@ class BlockSort(Node):
         elif gap < float("inf"):
             self.get_logger().info(f"옆 블록 있음, 틈 {mm(gap)} — 그대로 물립니다 [{near}]")
         if gap < FINGER_GAP_MIN:
-            # 돌려도 안 풀린다. 그래도 더 넓은 쪽으로 간다 — 여기서 포기하면
-            # 사람이 블록을 떼어 줄 때까지 그 칸을 못 만든다. 대신 크게 남긴다.
+            # 돌려도 안 풀린다 — 두 축 다 좁다.
             self.get_logger().error(
-                f"양쪽 다 좁습니다 (틈 {gap:.0f}mm < 손가락 {FINGER_GAP_MIN:.0f}mm) — "
-                "옆 블록을 칠 수 있습니다")
+                f"양쪽 다 좁습니다 (틈 {mm(gap)} < 손가락 {FINGER_GAP_MIN:.0f}mm) — "
+                + ("경고만 하고 그대로 집습니다 (PICK_WHEN_TIGHT=1)"
+                   if PICK_WHEN_TIGHT else "**집지 않습니다.** 옆 블록을 치우고 다시 명령하세요"))
             push_debug("warn", "파지",
-                       f"파지 틈이 {gap:.0f}mm 뿐입니다 — 옆 블록을 치울 것을 권합니다")
+                       f"파지 틈 {mm(gap)} — "
+                       + ("그대로 집습니다" if PICK_WHEN_TIGHT
+                          else "옆 블록을 치우고 다시 명령하세요"))
+            if not PICK_WHEN_TIGHT:
+                return None            # 부르는 쪽(pick)이 파지를 접는다
         return pose
 
     def pick(self, pose):
@@ -1370,7 +1388,10 @@ class BlockSort(Node):
         pose = list(pose)
         # 손목 방향을 먼저 정한다 — 파지 보정이 손목 각도에 딸려 있어서,
         # 보정을 더한 뒤에 돌리면 보정이 틀린 방향으로 남는다.
+        # None 이면 옆 블록에 막혀 내려갈 자리가 없다는 뜻이다.
         pose = self.aim_between_neighbors(pose)
+        if pose is None:
+            return False
         g = self.grasp_offset()
         self.get_logger().info(
             f"파지 보정 ({g[0]:+.1f}, {g[1]:+.1f}) @ 손목 {self.last_rot:+.0f}°")
