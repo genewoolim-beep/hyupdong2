@@ -41,6 +41,12 @@ from scipy.spatial.transform import Rotation
 import DR_init
 from od_msg.srv import SrvDepthPosition
 
+# 순수 기하(손목 회전·기울기 접기)는 여기 두지 않는다. block_sort 는 import 하는
+# 순간 DSR 에 붙어서 로봇 없이는 시험할 수 없기 때문이다 — 책상에서 확인할 수
+# 있는 계산은 block_geom 에 모아 test_copy_angle.py 가 그대로 시험한다.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from block_geom import fold90, rotate_tool          # noqa: E402
+
 ROBOT_ID, ROBOT_MODEL = "dsr01", "m0609"
 
 # 첫 실주행 때 50/80 으로 낮춰 뒀다가, 여러 번 무사히 돈 뒤 원래 값으로 되돌렸다.
@@ -93,6 +99,11 @@ OFFSET_TOOL = [-6.00, 6.00]
 # 기본 파지 방향. 관측 자세 그대로면 손가락이 base x 로 닫힌다.
 # 90 을 주면 base y 로 닫힌다.
 GRASP_ROT = 90.0
+
+# 복제(똑같이 / 좌우대칭)에서 **본보기의 기울기까지 따라 놓을지**.
+# 다른 명령(색·구역 지정 pick)에는 걸리지 않는다 — 그쪽은 따라할 본보기가 없다.
+# 놓을 때 손목을 그만큼 돌리는 것이라 모션이 바뀐다. 이상하면 0 으로 끈다.
+COPY_ANGLE = os.environ.get("COPY_ANGLE", "1") != "0"
 # 블록이 기울어져 있으면 그만큼 손목을 더 돌려 '면' 을 물게 한다.
 # 45° 돌아간 정사각 블록을 고정 각도로 물면 모서리만 잡혀 조일 때 돌아간다.
 # 정사각은 90° 대칭이므로 -45~+45 로 접어 회전량을 최소화한다.
@@ -799,29 +810,40 @@ class BlockSort(Node):
     def look(self, hz=None):
         """지금 자리에서 보이는 것을 인간구역/프리로 갈라 돌려준다.
 
-        (인간구역 {번호: 색}, 프리 {색: [검출, ...]}, 로봇구역 {번호: 색})
+        (인간구역 {번호: 색}, 프리 {색: [검출, ...]}, 로봇구역 {번호: 색},
+         구역 기울기 {("human"|"robot", 번호): 도})
+
         로봇구역·인간구역 위의 블록은 프리에서 빠진다 — 본보기와 방금 만든
         배치를 도로 집어가면 안 되기 때문이다.
         로봇구역에 이미 놓인 것도 돌려준다. 그 자리에 또 놓으려 하면 부딪힌다.
+
+        **기울기를 따로 담는 이유.** 구역 칸에는 색만 담아 왔다(대시보드도
+        비교 코드도 색 문자열을 기대한다). 그런데 복제가 본보기의 기울기까지
+        따라 놓으려면 그 값이 필요하다. 칸의 자료형을 바꾸면 부르는 쪽이
+        전부 흔들리므로, 같은 열쇠로 찾을 수 있는 별 딕셔너리로 내보낸다.
         """
         hz = self.human_zones() if hz is None else hz
         rz = self.cfg["zones"]
-        seen, free, occupied = {}, {}, {}
+        seen, free, occupied, ang = {}, {}, {}, {}
         for color in KNOWN_COLORS:
             for det in self._detect_all(color, quiet=True):
                 p = det["pose"]
                 if hz:
                     b = min(hz, key=lambda i: np.hypot(p[0] - hz[i][0], p[1] - hz[i][1]))
                     if np.hypot(p[0] - hz[b][0], p[1] - hz[b][1]) <= ZONE_RADIUS:
-                        seen.setdefault(b, color)
+                        if b not in seen:      # 먼저 본 것을 남긴다. 색과 기울기가
+                            seen[b] = color    # 같은 검출에서 나와야 짝이 맞는다.
+                            ang[("human", b)] = det["angle"]
                         continue
                 b = min(rz, key=lambda i: np.hypot(p[0] - rz[i][0], p[1] - rz[i][1]))
                 if np.hypot(p[0] - rz[b][0], p[1] - rz[b][1]) <= ZONE_RADIUS:
-                    occupied.setdefault(b, color)
+                    if b not in occupied:
+                        occupied[b] = color
+                        ang[("robot", b)] = det["angle"]
                     continue
                 if self.is_free(p):
                     free.setdefault(color, []).append(det)
-        return seen, free, occupied
+        return seen, free, occupied, ang
 
     def patrol(self, want=None, stop_on_find=True):
         """관심 영역 위를 경유점 따라 한 바퀴 돈다.
@@ -834,7 +856,8 @@ class BlockSort(Node):
         작게 잡혀 최소 면적에 걸리고, 비스듬히 보여 중심이 밀린다. 가까이서
         나눠 보면 두 문제가 같이 사라진다.
 
-        돌려주는 것: (인간구역, 프리재고, 로봇구역 점유, 멈춘 경유점 번호 또는 None)
+        돌려주는 것: (인간구역, 프리재고, 로봇구역 점유,
+                     멈춘 경유점 번호 또는 None, 구역 기울기)
         """
         pts = self.scan_points()
         if not pts:
@@ -847,18 +870,23 @@ class BlockSort(Node):
             start = min(RESCAN_SKIP, len(pts) - 1)
         pts = pts[start:]
         hz = self.human_zones()
-        seen, stock, occ = {}, {}, {}
+        seen, stock, occ, angles = {}, {}, {}, {}
         for i, p in enumerate(pts, 1):
             self.goto(p, f"[순회 {i + start}/{len(pts) + start}]")
-            s_i, f_i, o_i = self.look(hz)
+            s_i, f_i, o_i, a_i = self.look(hz)
             for z, c in o_i.items():
                 if z not in occ:
                     occ[z] = c
-                    self.get_logger().info(f"  로봇{z}번에 이미 {c} 있음")
+                    angles[("robot", z)] = a_i.get(("robot", z), 0.0)
+                    self.get_logger().info(
+                        f"  로봇{z}번에 이미 {c} 있음 "
+                        f"(기울기 {angles[('robot', z)]:.0f}°)")
             for z, c in s_i.items():
                 if z not in seen:
                     seen[z] = c
-                    self.get_logger().info(f"  인간{z}번 = {c}")
+                    angles[("human", z)] = a_i.get(("human", z), 0.0)
+                    self.get_logger().info(
+                        f"  인간{z}번 = {c}  기울기 {angles[('human', z)]:.0f}°")
             for c, lst in f_i.items():
                 known = stock.setdefault(c, [])
                 for det in lst:
@@ -872,8 +900,8 @@ class BlockSort(Node):
                         f"  프리 {c} ({det['pose'][0]:.0f}, {det['pose'][1]:.0f})")
             if want and stop_on_find and any(stock.get(c) for c in want):
                 self.get_logger().info(f"  필요한 블록 발견 — {i}번에서 순회 중단")
-                return seen, stock, occ, i
-        return seen, stock, occ, None
+                return seen, stock, occ, i, angles
+        return seen, stock, occ, None, angles
 
     def hover_over(self, xy):
         """저장해 둔 자리 위로 카메라를 **수직으로** 내려다보게 옮긴다.
@@ -904,7 +932,7 @@ class BlockSort(Node):
         방금 만든 배치가 무너진다.
         """
         # 한 바퀴 다 돈다 — 인간구역 4칸을 다 읽어야 계획을 세울 수 있다.
-        seen, stock, occ, _ = self.patrol()
+        seen, stock, occ, _, angles = self.patrol()
         # 전체 순회라 인간구역/로봇구역 둘 다 지금 상태 그대로다 — 대시보드에 반영.
         push_zones("human", seen, sorted(self.human_zones()))
         push_zones("robot", occ, sorted(self.cfg["zones"]))
@@ -920,7 +948,16 @@ class BlockSort(Node):
             if dst not in zones:
                 self.get_logger().warn(f"인간 {hz_i}번 → 로봇 {dst}번: 그 구역이 없습니다 — 건너뜀")
                 continue
-            plan.append((hz_i, dst, color))
+            # 본보기의 기울기. 놓을 때 손목을 이만큼 돌린다(place 참고).
+            #
+            # **좌우대칭이면 기울기도 뒤집는다.** 거울에 비친 +20° 는 -20° 다.
+            # 구역만 대칭으로 옮기고 각도를 그대로 두면, 배치는 대칭인데 블록이
+            # 기운 방향만 원본과 같아 눈에 대칭으로 보이지 않는다.
+            # mirror_zone 이 x축 대칭(y 부호 반전)이라 부호만 바꾸면 된다.
+            ang = angles.get(("human", hz_i), 0.0)
+            if mirror:
+                ang = -ang
+            plan.append((hz_i, dst, color, fold90(ang)))
         if not plan:
             self.go_home()
             return False
@@ -928,19 +965,23 @@ class BlockSort(Node):
         kind = "좌우대칭" if mirror else "그대로"
         self.get_logger().warn(
             f"복제 계획 [{kind}] — " +
-            ", ".join(f"인간{h}({c}) → 로봇{d}" for h, d, c in plan))
+            ", ".join(f"인간{h}({c} {a:+.0f}°) → 로봇{d}" for h, d, c, a in plan)
+            + ("" if COPY_ANGLE else "   (기울기 따라하기 꺼짐: COPY_ANGLE=0)"))
 
         # 이미 그 색이 놓여 있는 칸은 건드리지 않는다. 같은 자리에 또 놓으면 부딪힌다.
-        done = [(h, d, c) for h, d, c in plan if occ.get(d) == c]
+        # 기울기는 판정에 넣지 않는다 — 색이 맞으면 그대로 둔다. 각도를 맞추려고
+        # 이미 제자리에 있는 블록을 다시 집었다 놓으면, 얻는 것(몇 도)보다
+        # 잃는 것(파지 실패 위험, 시간)이 크다.
+        done = [t for t in plan if occ.get(t[1]) == t[2]]
         if done:
             self.get_logger().info(
-                "이미 맞게 놓인 칸: " + ", ".join(f"로봇{d}={c}" for _, d, c in done))
+                "이미 맞게 놓인 칸: " + ", ".join(f"로봇{d}={c}" for _, d, c, _a in done))
             plan = [t for t in plan if t not in done]
-        busy = [(h, d, c) for h, d, c in plan if d in occ]
+        busy = [t for t in plan if t[1] in occ]
         if busy:
             self.get_logger().warn(
                 "다른 색이 놓여 있어 건너뜁니다: "
-                + ", ".join(f"로봇{d}에 {occ[d]}(→{c} 필요)" for _, d, c in busy))
+                + ", ".join(f"로봇{d}에 {occ[d]}(→{c} 필요)" for _, d, c, _a in busy))
             plan = [t for t in plan if t not in busy]
         if not plan:
             self.go_home()
@@ -948,8 +989,8 @@ class BlockSort(Node):
             return True
 
         # 재고 부족은 옮기기 전에 알려준다. 반쯤 하다 멈추면 판이 어중간해진다.
-        short = [c for c in {c for _, _, c in plan}
-                 if len(stock.get(c, [])) < sum(1 for _, _, x in plan if x == c)]
+        short = [c for c in {t[2] for t in plan}
+                 if len(stock.get(c, [])) < sum(1 for t in plan if t[2] == c)]
         if short:
             self.get_logger().warn(
                 f"프리구역에 부족한 색: {', '.join(short)} — 그 칸은 건너뜁니다")
@@ -957,7 +998,7 @@ class BlockSort(Node):
 
         ok = True
         placed = {}
-        for hz_i, dst, color in plan:
+        for hz_i, dst, color, ang in plan:
             lst = stock.get(color) or []
             if not lst:
                 self.get_logger().warn(f"인간{hz_i}번의 {color} — 프리구역에 없어 건너뜀")
@@ -967,9 +1008,9 @@ class BlockSort(Node):
             det = lst.pop(0)              # 같은 색이 여럿이면 하나씩 소비한다
             xy = (det["pose"][0], det["pose"][1])
             self.get_logger().info(
-                f"── 인간{hz_i}번의 {color} → 로봇{dst}번  "
+                f"── 인간{hz_i}번의 {color} {ang:+.0f}° → 로봇{dst}번  "
                 f"(프리 ({xy[0]:.0f}, {xy[1]:.0f}) 에서 집기) ──")
-            if self.pick_cached(color, xy, dst):
+            if self.pick_cached(color, xy, dst, angle=ang):
                 placed[dst] = color
                 # 한 개 놓을 때마다 바로 보낸다. 네 개를 다 끝내고 한꺼번에 보내면
                 # 2분 넘게 화면이 그대로여서 진행 중인지 멈춘 건지 알 수가 없다.
@@ -983,11 +1024,14 @@ class BlockSort(Node):
         self.get_logger().warn(f"복제 {'완료' if ok else '일부 실패'}")
         return ok
 
-    def pick_cached(self, color, xy, zone):
+    def pick_cached(self, color, xy, zone, angle=None):
         """관측 때 봐 둔 자리로 곧장 가서 집고 구역에 놓는다.
 
         넓은 관측 자세로 되돌아가지 않는다 — 좌표를 이미 알고 있으므로 그 위로
         바로 올라가 정밀화만 하면 된다. 옮길 색 수만큼 왕복이 줄어든다.
+
+        angle 은 **놓을 때** 따라할 본보기 기울기다(복제 전용). 집기에는 쓰지
+        않는다 — 집을 때는 그 블록 자기 기울기에 손목을 맞춰야 한다.
         """
         if not self.hover_over(xy):
             self.get_logger().error("관측 자세가 없어 집을 수 없습니다.")
@@ -997,7 +1041,7 @@ class BlockSort(Node):
             # 그 자리에 없으면 블록이 굴렀거나 애초에 잘못 봤다. 그 색만 찾아
             # 다시 한 바퀴 돌고, 발견하는 즉시 멈춰 거기서 집는다.
             self.get_logger().warn(f"{color} 가 그 자리에 없음 — 그 색만 찾아 재순회")
-            _, stock, _, _ = self.patrol(want={color})
+            _, stock, _, _, _ = self.patrol(want={color})
             lst = stock.get(color) or []
             if not lst:
                 return False
@@ -1021,7 +1065,7 @@ class BlockSort(Node):
             self.get_logger().error("파지 실패")
             self.go_home()
             return False
-        self.place(zone)
+        self.place(zone, angle=angle)
         self.get_logger().info(f"완료: {color} → 로봇 {zone}번")
         return True
 
@@ -1127,11 +1171,11 @@ class BlockSort(Node):
             xyz[2] = self.pick_z            # x,y 는 검출값, z 는 티칭값
             rot = GRASP_ROT
             if ALIGN_TO_BLOCK:
-                rot += ((ang + 45.0) % 90.0) - 45.0     # -45~+45 로 접기
+                rot += fold90(ang)
             # 파지 자세는 언제나 수직이어야 한다. 관측 자세의 기울기를 물려받으면
             # 그리퍼가 비스듬히 내려가고, rotate_tool 이 기울어진 축으로 돌아
             # 블록 면에 손가락을 맞추지도 못한다. grasp_offset 실측도 수직 기준이다.
-            out.append({"pose": self.rotate_tool(list(xyz) + level_att(posx[3:]), rot),
+            out.append({"pose": rotate_tool(list(xyz) + level_att(posx[3:]), rot),
                         "cam": list(cam), "angle": ang, "top": top_z, "rot": rot})
         if not quiet:
             self.get_logger().info(
@@ -1270,9 +1314,37 @@ class BlockSort(Node):
         gripper.open_gripper(); wait_gripper()
         movel(up)
 
-    def place(self, zone):
+    def place(self, zone, angle=None):
+        """구역에 놓는다. angle 을 주면 그만큼 **손목을 돌린 채** 내려놓는다.
+
+        블록은 손가락에 정렬돼 물려 있다(파지 때 블록 면에 손목을 맞췄다).
+        그래서 놓기 직전에 손목을 d 만큼 돌리면 블록도 그만큼 돌아간 채 놓인다 —
+        본보기의 기울기를 따라 놓는 것이 곧 '손목을 그만큼 돌려 놓기' 다.
+        집는 동작은 건드리지 않는다. 그쪽은 원래 블록 자기 기울기에 맞춰야 한다.
+
+        **왜 검출각을 그대로 쓸 수 있나.** 검출각은 이미지(=공구) 기준이라
+        보통은 base 기준으로 바꿔야 한다. 그런데 이 판의 교시 자세들은
+        경유점·인간구역·로봇구역이 모두 공구 요를 90° 로 접었을 때 2.5° 안에서
+        일치한다(실측 2026-08-07: zones.yaml 의 rz-rx 가 전부 ≈0). 본보기를 본
+        자세와 놓는 자세의 공구 방향이 같으므로 변환이 필요 없다.
+        교시를 다시 하면서 손목 방향을 바꾸면 이 전제가 깨진다.
+
+        angle=None 이면 예전과 똑같다 — 색·구역 지정 명령은 따라할 본보기가
+        없으므로 이 길로 들어오지 않는다.
+        """
+        p = self.cfg["zones"][zone]
+        if angle is not None and COPY_ANGLE:
+            d = fold90(angle)
+            # 손목을 돌리면 손가락 중심이 TCP 둘레로 돈다(OFFSET_TOOL 만큼 떨어져
+            # 있다). 티칭 좌표는 티칭 당시 손목 방향 기준이라, 돌린 만큼 놓이는
+            # 자리가 최대 6.5mm(45°에서, 보통 ±20°면 3mm) 밀린다. 놓기 오차
+            # 10mm 안이라 지금은 보정하지 않는다 — 보정하려면 티칭 당시 손목각을
+            # 알아야 하고, 그건 복제 후 survey_zones 실측으로 확인한 뒤에 넣는
+            # 것이 맞다. 지금 짐작으로 넣으면 오차가 늘 수도 있다.
+            self.get_logger().info(f"놓기 손목 {d:+.0f}° (본보기 {angle:.0f}°)")
+            p = rotate_tool(list(p), d)
         # 구역은 티칭값이므로 보정을 더하지 않는다.
-        self.place_at(self.cfg["zones"][zone], taught=True)
+        self.place_at(p, taught=True)
 
     def _detect_raw(self, target):
         """z 를 티칭값으로 바꾸지 않은 날것의 base 좌표. 든 블록을 잴 때 쓴다."""
@@ -1329,14 +1401,6 @@ class BlockSort(Node):
         print(f"    (참고) 이 자세에서의 보정에 ({m[0]:+.1f}, {m[1]:+.1f}) 를 더하세요\n")
         return m
 
-    @staticmethod
-    def rotate_tool(posx, deg):
-        """공구 자신의 z 축 둘레로 deg 만큼 돌린 자세를 만든다."""
-        R = Rotation.from_euler("ZYZ", posx[3:], degrees=True).as_matrix()
-        Rn = R @ Rotation.from_euler("z", deg, degrees=True).as_matrix()
-        e = Rotation.from_matrix(Rn).as_euler("ZYZ", degrees=True)
-        return list(posx[:3]) + list(e)
-
     def calib_axis(self, target, deg, n=3):
         """손목을 deg 돌린 채로 집었다 놓고, 블록이 밀린 양을 잰다.
 
@@ -1350,9 +1414,9 @@ class BlockSort(Node):
             p = self.detect(target)
             if p is None:
                 self.get_logger().error("검출 실패 — 중단"); break
-            if not self.pick(self.rotate_tool(p, deg - GRASP_ROT)):
+            if not self.pick(rotate_tool(p, deg - GRASP_ROT)):
                 self.get_logger().error("파지 실패 — 중단"); break
-            self.place_at(self.rotate_tool(p, deg - GRASP_ROT))
+            self.place_at(rotate_tool(p, deg - GRASP_ROT))
             self.go_home()
             q = self.detect(target)
             if q is None:
@@ -1600,17 +1664,23 @@ class BlockSort(Node):
         pts = self.scan_points()
         if not pts:
             return {}
-        occ = {}
+        occ, angles = {}, {}
         for i in ZONE_SURVEY_POINTS:
             if i >= len(pts):
                 continue
             self.goto(pts[i], f"[구역확인 {i + 1}/{len(pts)}]")
-            _, _, o = self.look(hz={})      # 인간구역 판정은 여기서 필요 없다
+            _, _, o, a = self.look(hz={})   # 인간구역 판정은 여기서 필요 없다
             occ.update(o)
+            angles.update(a)
         zones = sorted(self.cfg["zones"])
+        # 기울기까지 찍는다. 복제가 본보기 각도를 따라 놓았는지 여기서 확인한다
+        # (복제 직후 이 값이 인간구역에서 읽은 각도와 같아야 한다).
         self.get_logger().info(
             "로봇구역 현황 — " +
-            ", ".join(f"{z}번={occ.get(z) or '비어있음'}" for z in zones))
+            ", ".join(
+                f"{z}번=" + (f"{occ[z]} {angles.get(('robot', z), 0.0):.0f}°"
+                             if occ.get(z) else "비어있음")
+                for z in zones))
         push_zones("robot", occ, zones)     # 안 보인 칸은 비었다고 반영된다
         return occ
 
@@ -1666,7 +1736,7 @@ class BlockSort(Node):
             return True
 
         # 색을 지정한 경우. 관심 영역을 돌다가 그 색을 프리구역에서 보면 멈춘다.
-        _, stock, _, at = self.patrol(want={target})
+        _, stock, _, at, _ = self.patrol(want={target})
         lst = stock.get(target) or []
         if not lst:
             self.get_logger().error(f"프리구역에서 {target} 을(를) 못 찾았습니다.")
@@ -1917,14 +1987,23 @@ def main():
             node.calibrate(sys.argv[2],
                            int(sys.argv[3]) if len(sys.argv) > 3 else 3)
         elif m in ("scan", "read-human", "read-free"):
-            seen, stock, occ, _ = node.patrol()
+            seen, stock, occ, _, angles = node.patrol()
             push_zones("human", seen, sorted(node.human_zones()))
             push_zones("robot", occ, sorted(node.cfg["zones"]))
             node.go_home()
-            print(f"\n  인간구역 = {seen or '읽기 실패'}")
+
+            # 기울기까지 찍는다. 복제가 본보기 각도를 따라 놓았는지 보려면
+            # 두 줄(인간/로봇)의 각도를 나란히 봐야 한다.
+            def _with_ang(space, d):
+                if not d:
+                    return None
+                return {z: f"{c} {angles.get((space, z), 0.0):+.0f}°"
+                        for z, c in sorted(d.items())}
+
+            print(f"\n  인간구역 = {_with_ang('human', seen) or '읽기 실패'}")
             counts = {c: len(v) for c, v in stock.items()}
             print(f"  프리 재고 = {counts}")
-            print(f"  로봇구역 점유 = {occ or '비어 있음'}\n")
+            print(f"  로봇구역 점유 = {_with_ang('robot', occ) or '비어 있음'}\n")
         elif m == "copy":
             node.copy_human(mirror=False)
         elif m == "copy-mirror":
