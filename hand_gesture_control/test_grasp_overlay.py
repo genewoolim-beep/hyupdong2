@@ -119,7 +119,7 @@ else:
     img, dep = synth(160.0)
     blocks = go.find_blocks(v, img, dep, det)
     assert blocks, "합성 블록을 아예 못 찾았다"
-    hit, name = go.draw(img, v, blocks)
+    hit, name = go.draw(img, v, blocks, depth=dep)
     assert hit and name.startswith("빨간색"), (hit, name, blocks)
     got_z = v.to_tcp(blocks[0][0])
     assert abs(got_z[2] - 160.0) < 8.0, got_z            # 깊이로 되돌린 높이가 맞나
@@ -130,7 +130,7 @@ else:
     img2, dep2 = synth(160.0, x_tcp=60.0)
     blocks2 = go.find_blocks(v, img2, dep2, det)
     assert blocks2, "비켜 놓은 블록도 검출은 돼야 한다"
-    hit2, _ = go.draw(img2, v, blocks2)
+    hit2, _ = go.draw(img2, v, blocks2, depth=dep2)
     assert not hit2, v.to_tcp(blocks2[0][0])
     print(f"8b 좌우 60mm 비킨 블록 → 빨강 (좌우 "
           f"{v.to_tcp(blocks2[0][0])[0]:+.0f}mm, 한계 ±{lim:.0f}mm)")
@@ -148,7 +148,7 @@ else:
     p3 = v.to_tcp(blocks3[0][0])
     assert blocks3[0][2] == "크기", blocks3[0]
     assert abs(p3[2] - 120.0) < 20.0, p3           # 크기 추정 오차
-    hit3, name3 = go.draw(img3, v, blocks3)
+    hit3, name3 = go.draw(img3, v, blocks3, depth=dep3)
     assert hit3, p3
     print(f"8c 깊이 0 → 크기로 추정  높이 {p3[2]:.0f}mm (넣은 값 120mm) → 초록 유지")
 
@@ -156,3 +156,28 @@ else:
     blocks4 = go.find_blocks(v, img3, None, det)
     assert blocks4 and blocks4[0][2] == "크기"
     print("8d 깊이 토픽이 없어도 구역·판정 유지")
+
+    # ── 9. 착지점 = 그대로 내려가면 닿는 표면 (블록을 따라다니는 게 아니다) ──
+    #     블록 위에서는 블록 윗면, 빈 판 위에서는 판에 찍혀야 한다.
+    img5, dep5 = synth(150.0)
+    got = go.landing_z(v, dep5)
+    assert got is not None and abs(got - 150.0) < 6.0, got
+    print(f"9a 블록 위 착지점 {got:.0f}mm (블록 윗면 150mm)")
+
+    #     블록을 지우면(판만 남으면) 판 거리로 찍힌다.
+    dep6 = np.full((H, W), 0, np.uint16)
+    plate_z = 300.0                                   # TCP 아래 300mm 에 판
+    for yy in range(0, H, 4):                         # 판 전체를 채운다
+        for xx in range(0, W, 4):
+            p = v.unproject(xx, yy, 1.0)              # 방향만 쓴다
+            # 그 광선이 z=plate_z 평면과 만나는 깊이
+            t = v.to_cam([0, 0, plate_z])[2] / p[2] if p[2] else 0
+            dep6[yy:yy+4, xx:xx+4] = int(1.0 * t)
+    got2 = go.landing_z(v, dep6)
+    assert got2 is not None and abs(got2 - plate_z) < 12.0, got2
+    print(f"9b 빈 판 착지점 {got2:.0f}mm (판 300mm) — 블록이 없어도 찍힌다")
+
+    #     깊이가 없으면 None → 부르는 쪽이 크기 추정으로 넘어간다
+    assert go.landing_z(v, None) is None
+    assert go.landing_z(v, np.zeros((H, W), np.uint16)) is None
+    print("9c 깊이 없음/전멸 → None (크기 추정으로 대체됨)")

@@ -163,7 +163,12 @@ class RealsenseBridge(Node):
             with self._lock:
                 depth = None if self._depth is None else self._depth.copy()
             self._blocks = self.go.find_blocks(self.view, frame, depth, self.det)
-        self.go.draw(frame, self.view, self._blocks)
+            self._last_depth = depth
+        # 착지점은 매 프레임 다시 잰다 — 팔이 내려가는 동안 표시가 따라와야 한다.
+        # 깊이 한 장을 몇 번 찍어보는 것뿐이라 싸다(landing_z 는 3회 반복).
+        with self._lock:
+            depth_now = None if self._depth is None else self._depth
+        self.go.draw(frame, self.view, self._blocks, depth=depth_now)
 
     def _sender_loop(self):
         while rclpy.ok():

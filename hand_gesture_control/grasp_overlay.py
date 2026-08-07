@@ -254,6 +254,44 @@ def depth_from_size(box, ang, fx):
     return float(fx * BLOCK_MM / side_px)
 
 
+def landing_z(view, depth, z_default=200.0, iters=3, tol=400.0):
+    """**그대로 수직 하강하면 닿는 지점**까지의 거리(mm, TCP 기준 z). 못 재면 None.
+
+    파지 구역을 여기에 그린다 — 블록을 따라다니는 표시가 아니라 "지금 내리면
+    여기 닿는다" 는 표시여야 조종에 쓸 수 있다. 판이든 블록이든 먼저 닿는 것에
+    찍힌다.
+
+    푸는 방법: 하강축 위의 점 (0,0,t) 가 찍히는 픽셀은 t 에 따라 옮겨간다
+    (카메라와 TCP 가 34mm 어긋난 시차). 그래서 한 번에 못 구하고 되짚는다 —
+    기본 거리로 픽셀을 잡고, 그 픽셀의 깊이로 t 를 고치고, 다시 픽셀을 잡는다.
+    세 번이면 수렴한다(시차가 작아 첫 보정에서 거의 맞는다).
+
+    깊이가 없으면 None 이다. 가까이서는 센서 최소거리(약 280mm) 밑으로 들어가
+    깊이가 통째로 0 이 되므로, 그때는 부르는 쪽이 블록 크기 추정으로 넘어간다.
+    """
+    if depth is None or view.intr is None:
+        return None
+    t = float(z_default)
+    for _ in range(iters):
+        uv = view.project(view.to_cam([0.0, 0.0, t]))
+        if uv is None:
+            return None
+        d = depth_at(depth, uv[0], uv[1])
+        if d is None:
+            return None
+        p = view.unproject(uv[0], uv[1], d)
+        if p is None:
+            return None
+        t_new = float(view.to_tcp(p)[2])
+        if not (0.0 < t_new < tol):
+            return None
+        if abs(t_new - t) < 0.5:
+            t = t_new
+            break
+        t = t_new
+    return t
+
+
 def find_blocks(view, frame_bgr, depth, det):
     """화면에 보이는 블록마다 (카메라좌표 mm, 색이름, 거리출처).
 
@@ -286,12 +324,16 @@ def find_blocks(view, frame_bgr, depth, det):
     return out
 
 
-def draw(frame, view, blocks, z_default=200.0):
-    """파지 구역과 판정을 프레임에 겹쳐 그린다. (그린 상태, 대상) 을 돌려준다.
+def draw(frame, view, blocks, depth=None, z_default=200.0):
+    """**그대로 내려가면 닿는 지점**에 파지 구역을 그린다. (초록인가, 대상)
 
-    blocks 는 [(카메라좌표, 색이름, 거리출처), ...]. 비어 있으면 기본 거리에
-    빨간 네모만. 가능한 블록이 있으면 그 블록 높이에 초록 네모를 그리고
-    "파지 가능" 을 띄운다.
+    네모는 하강축이 먼저 닿는 표면(판이든 블록이든)에 찍힌다 — 블록을 따라다니는
+    표시가 아니다. 색은 그 구역 안에 물 수 있는 블록이 있는가로 갈린다.
+
+        빨강  구역 안에 물 만한 블록이 없다
+        초록  있다 → "파지 가능"
+
+    blocks 는 find_blocks() 결과, depth 는 정렬된 깊이(없어도 된다).
     """
     import cv2
 
@@ -309,18 +351,20 @@ def draw(frame, view, blocks, z_default=200.0):
         if best is None or score < best:
             best, hit = score, (p_cam, f"{name}·{how}", why)
 
-    # 네모를 그릴 깊이. 가능한 블록이 있으면 그 높이, 없어도 **보이는 블록이
-    # 있으면 가장 가까운 것의 높이**를 쓴다 — 그러면 그리퍼가 내려갈 때 네모가
-    # 판을 따라 내려와 손가락 면과 어긋나 보이지 않는다. 아무것도 없을 때만
-    # 기본 거리다.
-    if hit:
-        z = view.to_tcp(hit[0])[2]
-    elif blocks:
-        zs = [view.to_tcp(b[0])[2] for b in blocks]
-        near = [t for t in zs if 0.0 < t < REACH]
-        z = min(near) if near else z_default
-    else:
-        z = z_default
+    # 네모를 그릴 자리 = **그대로 내려가면 닿는 지점.** 블록을 따라다니는 표시가
+    # 아니다 — 블록이 없어도 판 위에 찍혀야 "지금 내리면 여기" 가 된다.
+    #
+    #   ① 깊이로 하강축이 먼저 닿는 표면을 찾는다 (landing_z)
+    #   ② 깊이가 죽는 가까운 거리에서는 보이는 블록의 크기 추정으로 대신한다
+    #   ③ 둘 다 없으면 기본 거리 — 그래도 네모는 항상 보여야 한다
+    z = landing_z(view, depth, z_default)
+    src = "깊이"
+    if z is None:
+        near = [t for t in (view.to_tcp(b[0])[2] for b in blocks) if 0.0 < t < REACH]
+        if near:
+            z, src = min(near), "크기"
+        else:
+            z, src = z_default, "추정없음"
     quad = view.corridor_quad(z)
     if quad is None:
         return False, None
@@ -343,7 +387,10 @@ def draw(frame, view, blocks, z_default=200.0):
         _, name, why = hit
         txt, alt = f"파지 가능 — {name} ({why})", f"GRASP OK - {name} ({why})"
     else:
-        txt, alt = "파지 구역 비어 있음", "no block in grasp zone"
+        # 빨강일 때도 **얼마나 내려가면 닿는지**는 알려준다. 그것이 이 표시의
+        # 본래 목적이다 — 초록이 아니어도 조종에 쓰인다.
+        d = f"{z:.0f}mm 아래" if src != "추정없음" else "거리 모름"
+        txt, alt = f"착지점 {d} — 물 블록 없음", f"landing {d} - no block"
     put_text(frame, txt, (max(cx - 150, 10), max(top - 34, 4)), col,
              ascii_fallback=alt)
     cv2.putText(frame, f"opening {view.half_open * 2:.0f}mm", (10, 28),
