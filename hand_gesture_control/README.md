@@ -52,7 +52,7 @@ python3 hand_gesture_control.py            # 인식만 (로봇 안 붙음)
 | `GESTURE_TASK` | 스크립트와 같은 폴더 | `gesture_recognizer.task` 위치 |
 | `GESTURE_SOURCE` | `v4l2` | 프레임 출처. `v4l2`(장치 직접 열기) 또는 `ros`(토픽 구독) |
 | `GESTURE_CAM_TOPIC` | `/webcam/image_raw` | `GESTURE_SOURCE=ros`일 때 구독할 토픽 |
-| `GESTURE_ROTATE` | `0` | 화면을 반시계로 돌린다 (0/90/180/270). 웹캠을 세로로 세워 달았으면 `90` |
+| `GESTURE_ROTATE` | `90` | 화면을 반시계로 돌린다 (0/90/180/270). **기본이 세로다** — 지금 설치가 그렇다. 가로로 쓰는 PC 는 `0` |
 | `GESTURE_ROI_CX/CY/R` | `0.22/0.62/0.25` | 십자선 중심·크기. 크기는 **짧은 변** 기준이라 세로 화면에서도 같은 크기다 |
 
 회전은 **인식보다 먼저** 걸린다(`orient()` — 회전 → 거울). 다 그린 뒤 돌리면

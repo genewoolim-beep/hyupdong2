@@ -120,7 +120,15 @@ body {
   flex-direction: column;
   gap: 16px;
 }
-.gesture-cam-panel .video-feed { max-width: 640px; width: 100%; margin: 0 auto; }
+/* 조종 화면은 **영상 모양을 그대로 따라간다.** 16:9 로 고정하면 세로로 세운
+   화면(GESTURE_ROTATE=90)이 가운데 얇은 띠로 쪼그라든다. aspect-ratio 를 풀고
+   높이를 영상에 맡기면 가로·세로 어느 쪽이 와도 여백 없이 꽉 찬다 —
+   회전 설정을 CSS 가 알 필요가 없어진다. */
+.gesture-cam-panel .video-feed {
+  max-width: 360px; width: 100%; margin: 0 auto;
+  aspect-ratio: auto; max-height: 62vh;
+}
+.gesture-cam-panel .video-feed img { height: auto; max-height: 62vh; }
 
 /* ---------- Mode banner (제어 화면) ---------- */
 .mode-banner {

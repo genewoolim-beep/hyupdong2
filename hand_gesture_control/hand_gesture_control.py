@@ -64,14 +64,16 @@ HAND_TASK = os.environ.get("GESTURE_TASK", os.path.join(HERE, "gesture_recognize
 GESTURE_SOURCE = os.environ.get("GESTURE_SOURCE", "v4l2").lower()
 GESTURE_CAM_TOPIC = os.environ.get("GESTURE_CAM_TOPIC", "/webcam/image_raw")
 
-# 화면을 반시계로 이만큼 돌린다 (0/90/180/270). 웹캠을 세로로 세워 달았을 때
-# 90 을 주면 사람이 똑바로 보인다.
+# 화면을 반시계로 이만큼 돌린다 (0/90/180/270).
+#
+# **기본이 90(세로)이다.** 지금 설치가 그렇다 — 이 값이 0 이면 조종 화면이
+# 눕는다(2026-08-07 현장 확인). 가로로 쓰는 PC 에서는 GESTURE_ROTATE=0.
 #
 # **인식보다 먼저 돌린다.** 다 그린 뒤 돌리면 십자선·게이지는 돌아가지만 판정은
 # 안 돌아가서, 화면에서 위로 벗어난 손이 로봇에게는 옆으로 읽힌다.
 # 순서는 회전 → 거울이다. 거울은 조작자 기준 좌우여야 하므로 똑바로 세운 뒤에
 # 뒤집어야 한다.
-GESTURE_ROTATE = int(os.environ.get("GESTURE_ROTATE", 0)) % 360
+GESTURE_ROTATE = int(os.environ.get("GESTURE_ROTATE", 90)) % 360
 _ROT = {90: cv2.ROTATE_90_COUNTERCLOCKWISE, 180: cv2.ROTATE_180,
         270: cv2.ROTATE_90_CLOCKWISE}
 
@@ -580,14 +582,15 @@ def draw_roi(frame):
     #            **실제로 보내는 값(Y_SIGN)에서 뽑는다.**
     # 축 글자를 손으로 박아두면 매핑을 바꿨을 때 화면만 옛말을 한다 — 조종에서
     # 화면이 거짓말하면 사람이 반대로 밀고, 그건 팔이 엉뚱한 쪽으로 가는 것이다.
-    # 글자 자리는 화면 안으로 물린다. 세로 화면에서는 왼쪽 글자가 밖으로 밀려
-    # 사라졌다(실측: 중심 188px, 팔 180px → 글자 x 가 -52).
-    h, w = frame.shape[:2]
+    # 좌우 글자는 팔 **안쪽 위**에 붙인다. 팔 바깥에 두면 세로 화면에서 화면을
+    # 벗어나고(실측: 중심 188px, 팔 180px → 글자 x 가 -52), 화면 안으로 물리면
+    # 팔 끝 점과 겹친다. 안쪽은 십자선이 이미 화면 안이라 항상 자리가 있다.
+    h = frame.shape[0]
     right_ax, left_ax = ("+Y", "-Y") if Y_SIGN < 0 else ("-Y", "+Y")
     for txt, org in (("FWD +X", (cx - 30, max(cy - arm - 12, 14))),
                      ("BACK -X", (cx - 34, min(cy + arm + 22, h - 6))),
-                     (f"L {left_ax}", (max(cx - arm - 60, 4), cy + 5)),
-                     (f"R {right_ax}", (min(cx + arm + 10, w - 66), cy + 5))):
+                     (f"L {left_ax}", (cx - arm + 6, cy - 10)),
+                     (f"R {right_ax}", (cx + arm - 52, cy - 10))):
         cv2.putText(frame, txt, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, C, 1, cv2.LINE_AA)
     cv2.putText(frame, "STOP", (cx - 20, cy - dead - 6),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, D, 1, cv2.LINE_AA)

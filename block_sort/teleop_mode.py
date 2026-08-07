@@ -84,7 +84,12 @@ def run(cap, dsr, gripper, on_frame=None, should_stop=None,
 
     P = hg.HandController()
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(WIN, 960, 540)
+    # 창 크기를 화면 방향에 맞춘다. 세로로 세운 화면(GESTURE_ROTATE=90)을
+    # 가로 창에 넣으면 가운데 얇은 띠로 쪼그라든다.
+    if hg.GESTURE_ROTATE in (90, 270):
+        cv2.resizeWindow(WIN, 540, 960)
+    else:
+        cv2.resizeWindow(WIN, 960, 540)
     log(f"제어모드 — 왼손 십자선으로 xy, 오른손 게이지로 z, 주먹/펼침으로 그리퍼. "
         f"돌아가기: 양손 {hg.RETURN_HOLD_SEC:.0f}초 펴기 / Q / 대시보드")
 
