@@ -123,9 +123,15 @@ class GraspView:
     """
 
     def __init__(self, handeye=None, intr=None):
+        # 핸드아이 T 는 **카메라 좌표를 TCP 좌표로** 옮기는 행렬이다.
+        #   p_tcp = R · p_cam + t
+        # block_sort 가 base2gripper @ gripper2cam 으로 쓰는 방향이 그것이다.
+        # 여기서는 그 반대 방향(TCP → 카메라)도 쓰므로 전치를 취한다(to_cam).
+        # 방향을 거꾸로 적으면 파지 구역이 엉뚱한 데 그려지고, 그건 사람이
+        # 그 자리로 팔을 가져가게 만든다.
         T = load_handeye() if handeye is None else handeye
-        self.R = np.array(T[:3, :3], float)      # TCP → 카메라 회전
-        self.t = np.array(T[:3, 3], float)       # TCP 에서 카메라까지(mm)
+        self.R = np.array(T[:3, :3], float)      # 카메라 → TCP 회전
+        self.t = np.array(T[:3, 3], float)       # TCP 좌표로 본 카메라 위치(mm)
         self.intr = intr
         # 손가락 반폭(mm). TF 를 못 읽으면 이 값으로 그린다(RG2 최대 개구 근처).
         self.half_open = 55.0
