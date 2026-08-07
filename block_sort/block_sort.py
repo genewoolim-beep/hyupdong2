@@ -45,7 +45,7 @@ from od_msg.srv import SrvDepthPosition
 # 순간 DSR 에 붙어서 로봇 없이는 시험할 수 없기 때문이다 — 책상에서 확인할 수
 # 있는 계산은 block_geom 에 모아 test_copy_angle.py 가 그대로 시험한다.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from block_geom import fold90, rotate_tool          # noqa: E402
+from block_geom import best_axis, fold90, rotate_tool, tool_yaw   # noqa: E402
 
 ROBOT_ID, ROBOT_MODEL = "dsr01", "m0609"
 
@@ -159,6 +159,15 @@ TRANSIT_Z = float(os.environ.get("TRANSIT_Z", 250.0))
 # 블록 윗면이 판 위 35mm 이므로 120mm 면 손가락 밑으로 여유가 충분하다.
 # 이송(TRANSIT_Z=250)과 달리 물린 블록이 없어 여유가 덜 필요하다.
 APPROACH_Z = float(os.environ.get("APPROACH_Z", 120.0))
+
+# 옆 블록을 피하려고 손목을 돌릴지 볼 때, 이 반경 안의 블록만 본다(mm).
+# 더 멀면 손가락 근처에 오지 않는다 — 개구 절반(약 55) + 블록 한 변이면 넉넉하다.
+NEIGHBOR_R = float(os.environ.get("NEIGHBOR_R", 95.0))
+# 손가락이 들어가려면 블록 사이에 이만큼은 있어야 한다(mm). 이보다 좁으면
+# 돌려도 안 풀리므로 크게 경고한다. block_geom.FINGER_T 와 같은 뜻이다.
+FINGER_GAP_MIN = float(os.environ.get("FINGER_GAP_MIN", 10.0))
+# 0 이면 이 기능을 끈다(예전처럼 검출 각도대로만 물린다).
+AVOID_NEIGHBORS = os.environ.get("AVOID_NEIGHBORS", "1") != "0"
 
 # 순회에서 봐 둔 자리와 다시 봤을 때의 자리가 이보다 벌어지면 다른 블록으로 본다.
 # 실측 2026-08-04: 한계가 없어 250mm 떨어진 같은 색을 집으러 갔다.
@@ -1290,9 +1299,78 @@ class BlockSort(Node):
         R = np.array([[np.cos(r), -np.sin(r)], [np.sin(r), np.cos(r)]])
         return np.array(OFFSET_BASE) + R @ np.array(OFFSET_TOOL)
 
+    def neighbors_xy(self, target_xy, radius=None):
+        """지금 시야에서 target 주변에 있는 **다른** 블록들의 중심 (base xy).
+
+        색을 전부 물어본다. 팔이 멈춰 있으므로 검출 노드가 촬영 한 번을 6색이
+        나눠 쓴다(프레임 캐시가 자세 기준이라 그렇다 — 실측 6색 2.07초).
+        """
+        radius = NEIGHBOR_R if radius is None else radius
+        out = []
+        for color in KNOWN_COLORS:
+            for det in self._detect_all(color, quiet=True):
+                p = det["pose"]
+                d = float(np.hypot(p[0] - target_xy[0], p[1] - target_xy[1]))
+                if d < 10.0:
+                    continue                  # 자기 자신
+                if d <= radius:
+                    out.append((p[0], p[1], color))
+        return out
+
+    def aim_between_neighbors(self, pose):
+        """손가락이 내려갈 방향에 블록이 있으면 **손목을 90° 돌린다.**
+
+        그리퍼는 한 축의 양쪽에서 손가락이 내려와 안쪽으로 닫힌다. 그 축에 다른
+        블록이 얹혀 있으면 손가락이 그것을 치거나 밀어낸다(실측: 파지 중 오류로
+        정지했다). 정사각 블록은 90° 대칭이라 **돌려도 물리는 품질이 같다** —
+        물는 면이 옆면에서 옆면으로 바뀔 뿐이다. 그래서 여유가 넓은 쪽을 고르면
+        잃는 것이 없다.
+
+        판단은 block_geom.best_axis 가 한다(로봇 없이 시험된다 — test_avoid.py).
+        여기서는 **좌표를 모아 주고, 고른 결과를 자세와 last_rot 에 반영**한다.
+        last_rot 을 같이 돌려야 파지 보정(grasp_offset)이 함께 돌아간다 —
+        공구 성분(OFFSET_TOOL)이 손목과 같이 도는 값이기 때문이다.
+        """
+        if not AVOID_NEIGHBORS:
+            return pose
+        nb = self.neighbors_xy((pose[0], pose[1]))
+        if not nb:
+            return pose
+        axis = tool_yaw(pose[3:])          # 손가락이 닫히는 축의 base 방위
+        turn, gap, gap0 = best_axis((pose[0], pose[1]), axis,
+                                    [(x, y) for x, y, _c in nb])
+        near = ", ".join(f"{c}({x:.0f},{y:.0f})" for x, y, c in nb)
+
+        def mm(v):
+            """무한(방해 없음)을 '충분' 으로 읽히게. 'infmm' 은 로그에서 읽기 어렵다."""
+            return "충분" if v == float("inf") else f"{v:.0f}mm"
+
+        if turn:
+            self.get_logger().warn(
+                f"옆 블록 때문에 손목을 {turn:+.0f}° 돌립니다 — "
+                f"틈 {mm(gap0)} → {mm(gap)}  [{near}]")
+            push_debug("info", "파지", f"옆 블록 회피 — 손목 {turn:+.0f}° "
+                                      f"(틈 {mm(gap0)}→{mm(gap)})")
+            pose = rotate_tool(list(pose), turn)
+            self.last_rot += turn
+        elif gap < float("inf"):
+            self.get_logger().info(f"옆 블록 있음, 틈 {mm(gap)} — 그대로 물립니다 [{near}]")
+        if gap < FINGER_GAP_MIN:
+            # 돌려도 안 풀린다. 그래도 더 넓은 쪽으로 간다 — 여기서 포기하면
+            # 사람이 블록을 떼어 줄 때까지 그 칸을 못 만든다. 대신 크게 남긴다.
+            self.get_logger().error(
+                f"양쪽 다 좁습니다 (틈 {gap:.0f}mm < 손가락 {FINGER_GAP_MIN:.0f}mm) — "
+                "옆 블록을 칠 수 있습니다")
+            push_debug("warn", "파지",
+                       f"파지 틈이 {gap:.0f}mm 뿐입니다 — 옆 블록을 치울 것을 권합니다")
+        return pose
+
     def pick(self, pose):
         """접근 → 하강 → 파지 → 확인. 성공하면 True."""
         pose = list(pose)
+        # 손목 방향을 먼저 정한다 — 파지 보정이 손목 각도에 딸려 있어서,
+        # 보정을 더한 뒤에 돌리면 보정이 틀린 방향으로 남는다.
+        pose = self.aim_between_neighbors(pose)
         g = self.grasp_offset()
         self.get_logger().info(
             f"파지 보정 ({g[0]:+.1f}, {g[1]:+.1f}) @ 손목 {self.last_rot:+.0f}°")

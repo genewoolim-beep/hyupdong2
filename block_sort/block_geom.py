@@ -44,3 +44,58 @@ def tool_yaw(att):
     import numpy as np
     R = Rotation.from_euler("ZYZ", att, degrees=True).as_matrix()
     return float(np.degrees(np.arctan2(R[1, 0], R[0, 0])))
+
+
+# ── 옆 블록 피하기 ────────────────────────────────────────────────
+# 그리퍼는 두 손가락이 **한 축의 양쪽에서** 내려와 안쪽으로 닫힌다. 그 축에 다른
+# 블록이 얹혀 있으면 손가락이 그것을 치거나 밀어낸다(실측: 파지 중 오류로 정지).
+#
+# 정사각 블록은 90° 대칭이라 **손목을 90° 돌려도 파지 품질이 같다** — 물리는 면이
+# 옆면에서 옆면으로 바뀔 뿐이다. 그래서 두 축을 견주어 여유가 넓은 쪽을 고르면
+# 공짜로 얻는다. 이 판단에 필요한 것은 옆 블록들의 중심 좌표뿐이다.
+
+BLOCK_MM = 35.0          # 블록 한 변
+FINGER_T = 10.0          # 손가락 두께. 이만큼은 틈에 들어가야 한다
+# 손가락 패드가 축과 나란히 덮는 폭의 절반. 이보다 옆으로 비켜 있는 블록은
+# 손가락이 지나가도 안 닿는다.
+LANE_HALF = 29.5         # 블록 절반(17.5) + 패드 절반 길이(12)
+
+
+def approach_gap(target_xy, axis_deg, neighbors, block_mm=BLOCK_MM,
+                 lane_half=LANE_HALF):
+    """그 축으로 손가락을 내릴 때 **가장 좁은 틈**(mm). 방해가 없으면 큰 값.
+
+    축 방향으로 재고, 축에서 옆으로 lane_half 넘게 비킨 블록은 무시한다 —
+    손가락이 그 옆을 지나가므로 닿지 않는다.
+    틈은 두 블록 **표면 사이** 거리다(중심거리 - 한 변). 손가락 두께(FINGER_T)
+    보다 좁으면 들어갈 자리가 없다는 뜻이다.
+    """
+    import numpy as np
+    r = np.radians(float(axis_deg))
+    ax = np.array([np.cos(r), np.sin(r)])          # 손가락이 닫히는 축
+    perp = np.array([-ax[1], ax[0]])
+    best = float("inf")
+    for nb in neighbors:
+        d = np.array([float(nb[0]) - target_xy[0], float(nb[1]) - target_xy[1]])
+        if abs(float(perp @ d)) >= lane_half:
+            continue                               # 옆으로 비켜 있다
+        gap = abs(float(ax @ d)) - block_mm         # 표면 사이 거리
+        best = min(best, gap)
+    return best
+
+
+def best_axis(target_xy, axis_deg, neighbors, finger_t=FINGER_T, **kw):
+    """축을 그대로 둘지 90° 돌릴지 고른다. (돌릴 각도, 그 축의 틈, 원래 축의 틈)
+
+    돌릴 각도는 0 또는 90 이다. **같으면 돌리지 않는다** — 이유 없는 회전은
+    파지 보정(grasp_offset)만 흔든다.
+    finger_t 보다 넓은 쪽을 고르고, 둘 다 좁으면 그래도 넓은 쪽을 준다
+    (부르는 쪽이 경고한다).
+    """
+    g0 = approach_gap(target_xy, axis_deg, neighbors, **kw)
+    g90 = approach_gap(target_xy, axis_deg + 90.0, neighbors, **kw)
+    if g0 >= finger_t:
+        return 0.0, g0, g0                         # 지금도 넉넉하다
+    if g90 > g0:
+        return 90.0, g90, g0
+    return 0.0, g0, g0
