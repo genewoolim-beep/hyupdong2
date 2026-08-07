@@ -104,7 +104,14 @@ def put_text(frame, text, org, color, size=26, ascii_fallback=None):
         return frame
     from PIL import Image, ImageDraw
     img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    ImageDraw.Draw(img).text(org, text, font=_FONT[1],
+    # 글자 폭을 재서 화면 안으로 물린다. 세로로 돌린 화면은 폭이 720 뿐이라
+    # 물리지 않으면 오른쪽이 잘려 나간다("… (149m" 처럼).
+    try:
+        tw = _FONT[1].getlength(text)
+    except Exception:
+        tw = len(text) * size * 0.6
+    x = min(max(float(org[0]), 4.0), max(frame.shape[1] - tw - 6.0, 4.0))
+    ImageDraw.Draw(img).text((x, org[1]), text, font=_FONT[1],
                              fill=(color[2], color[1], color[0]))
     frame[:] = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
     return frame
@@ -324,7 +331,44 @@ def find_blocks(view, frame_bgr, depth, det):
     return out
 
 
-def draw(frame, view, blocks, depth=None, z_default=200.0):
+def _rot_map(rotate, src_shape):
+    """소스 픽셀 (u,v) → 돌린 영상의 픽셀. cv2.rotate 와 같은 규약이다."""
+    h, w = src_shape[:2]
+    if rotate == 90:                                  # 반시계
+        return lambda u, v: (v, (w - 1) - u)
+    if rotate == 180:
+        return lambda u, v: ((w - 1) - u, (h - 1) - v)
+    if rotate == 270:                                 # 시계
+        return lambda u, v: ((h - 1) - v, u)
+    return lambda u, v: (u, v)
+
+
+_ROT = {}
+
+
+def render(frame, view, blocks, depth=None, rotate=0, z_default=200.0):
+    """AR 을 겹치고 화면을 rotate 만큼 돌려서 돌려준다. (돌린 프레임, 초록인가, 대상)
+
+    **기하는 소스 방향에서 계산하고, 그리기만 돌린 좌표에서 한다.**
+    다 그린 뒤 영상을 돌리면 "파지 가능" 글자까지 같이 눕는다. 반대로 영상을
+    먼저 돌리고 기하를 다시 풀면 내부파라미터와 깊이 영상까지 돌려야 해서
+    검증된 계산이 통째로 흔들린다. 그래서 **점만 옮긴다**(_rot_map).
+    """
+    import cv2
+    if not _ROT:
+        _ROT.update({90: cv2.ROTATE_90_COUNTERCLOCKWISE, 180: cv2.ROTATE_180,
+                     270: cv2.ROTATE_90_CLOCKWISE})
+    rotate = int(rotate) % 360
+    if rotate not in _ROT:
+        hit, name = draw(frame, view, blocks, depth, z_default)
+        return frame, hit, name
+    out = cv2.rotate(frame, _ROT[rotate])
+    hit, name = draw(out, view, blocks, depth, z_default,
+                     xy=_rot_map(rotate, frame.shape))
+    return out, hit, name
+
+
+def draw(frame, view, blocks, depth=None, z_default=200.0, xy=None):
     """**그대로 내려가면 닿는 지점**에 파지 구역을 그린다. (초록인가, 대상)
 
     네모는 하강축이 먼저 닿는 표면(판이든 블록이든)에 찍힌다 — 블록을 따라다니는
@@ -334,6 +378,9 @@ def draw(frame, view, blocks, depth=None, z_default=200.0):
         초록  있다 → "파지 가능"
 
     blocks 는 find_blocks() 결과, depth 는 정렬된 깊이(없어도 된다).
+    xy 는 소스 픽셀을 그릴 좌표로 옮기는 함수 — 화면을 돌려 그릴 때 쓴다
+    (render 참고). frame 은 그때 **이미 돌아간** 영상이고, depth·기하 계산은
+    소스 방향 그대로다.
     """
     import cv2
 
@@ -370,7 +417,8 @@ def draw(frame, view, blocks, depth=None, z_default=200.0):
         return False, None
 
     col = GREEN if hit else RED
-    pts = np.array(quad, np.int32)
+    # 소스 좌표로 계산한 네 점을 그릴 좌표로 옮긴다(회전 없으면 그대로).
+    pts = np.array([xy(u, v) for (u, v) in quad] if xy else quad, np.int32)
     cv2.polylines(frame, [pts], True, col, 2, cv2.LINE_AA)
     # 네 귀퉁이만 굵게 — 안이 비어 보여야 블록이 가려지지 않는다
     for (x, y) in pts:

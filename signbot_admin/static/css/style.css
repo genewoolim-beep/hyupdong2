@@ -120,18 +120,9 @@ body {
   flex-direction: column;
   gap: 16px;
 }
-/* 조종 화면은 **영상 모양을 그대로 따라간다 — 검은 여백을 만들지 않는다.**
-   틀을 16:9 로 고정하면 세로로 세운 화면(GESTURE_ROTATE=90)이 가운데 얇은
-   띠가 되고 위아래가 검게 남는다. 반대로 영상을 잘라 틀에 맞추면 시야를 잃는다.
-   그래서 **틀이 영상을 따라간다**: 폭만 정하고 높이는 영상 비율이 정한다.
-   max-height 를 걸면 안 된다 — 그 순간 다시 여백이 생긴다(높이는 잘리고 폭은
-   그대로라 contain 이 letterbox 를 만든다).
-   이러면 CSS 가 회전·자르기 설정을 알 필요가 없다. 가로가 와도 세로가 와도 맞는다. */
-.gesture-cam-panel .video-feed {
-  max-width: 300px; width: 100%; margin: 0 auto;
-  aspect-ratio: auto; min-height: 120px;
-}
-.gesture-cam-panel .video-feed img { width: 100%; height: auto; display: block; }
+/* 조종 화면(조작자 웹캠)은 보조 화면이라 폭만 묶어 둔다. 비율은 위의
+   .video-feed 규칙이 이미 영상에 맡기고 있다. */
+.gesture-cam-panel .video-feed { max-width: 480px; width: 100%; margin: 0 auto; }
 
 /* ---------- Mode banner (제어 화면) ---------- */
 .mode-banner {
@@ -151,8 +142,15 @@ body {
 .mode-banner-hint { font-size: 13px; color: var(--text-muted); }
 .mode-banner-updated { font-size: 12px; color: var(--text-light); }
 
+/* 카메라 화면은 **영상 비율을 그대로 따라간다 — 검은 여백을 만들지 않는다.**
+   16:9 로 고정해 두면 세로로 돌린 영상(리얼센스 720x1280)이 가운데 얇은 띠가
+   되고 위아래가 검게 남는다. 반대로 영상을 잘라 틀에 맞추면 시야를 잃는다.
+   그래서 틀이 영상을 따라간다: 폭만 정하고 높이는 img 가 정한다.
+   max-height 를 걸면 안 된다 — 높이만 잘리고 폭은 그대로여서 다시 여백이 생긴다.
+   min-height 는 **첫 프레임이 오기 전** 안내문 자리다(영상이 오면 무의미해진다). */
 .video-feed {
-  aspect-ratio: 16 / 9;      /* 카메라 캡처 해상도(1280x720)와 동일 — 잘리지 않게 유지 */
+  aspect-ratio: auto;
+  min-height: 120px;
   border-radius: 8px;
   background: #17181F;
   display: flex;
@@ -161,7 +159,7 @@ body {
   overflow: hidden;
   position: relative;
 }
-.video-feed img { width: 100%; height: 100%; object-fit: contain; }
+.video-feed img { width: 100%; height: auto; display: block; }
 .video-placeholder-text { color: var(--text-muted); font-size: 13px; }
 
 .recog-row { display: flex; align-items: center; gap: 12px; }

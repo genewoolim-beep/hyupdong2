@@ -181,3 +181,32 @@ else:
     assert go.landing_z(v, None) is None
     assert go.landing_z(v, np.zeros((H, W), np.uint16)) is None
     print("9c 깊이 없음/전멸 → None (크기 추정으로 대체됨)")
+
+    # ── 10. 화면을 세로로 돌려도 AR 이 제자리에, 글자는 눕지 않는다 ──
+    #     리얼센스는 세로로 돌려 보낸다(REALSENSE_ROTATE=90). 기하는 소스
+    #     좌표에서 계산하고 그리기만 돌린 좌표에서 한다 — 다 그린 뒤 돌리면
+    #     "파지 가능" 글자까지 눕는다.
+    img7, dep7 = synth(150.0)
+    out, hit7, name7 = go.render(img7, v, go.find_blocks(v, img7, dep7, det),
+                                 depth=dep7, rotate=90)
+    assert out.shape[0] == img7.shape[1] and out.shape[1] == img7.shape[0], out.shape
+    assert hit7 and name7.startswith("빨간색"), (hit7, name7)
+
+    #     매핑이 맞는가: 소스에서 계산한 착지점 픽셀을 돌린 좌표로 옮긴 곳에
+    #     블록(빨강)이 있고, 네모 중심 십자(초록)도 거기 있어야 한다.
+    #     (초록 픽셀 전체의 중심으로 재면 안 된다 — 글자까지 초록이라 위로 끌린다)
+    uv_src = v.project(v.to_cam([0.0, 0.0, 150.0]))
+    mx, my = go._rot_map(90, img7.shape)(*uv_src)
+    r = np.argwhere((out[:, :, 2] > 150) & (out[:, :, 1] < 100))
+    assert r.size, "돌린 영상에 블록이 없다"
+    dx, dy = abs(r[:, 1].mean() - mx), abs(r[:, 0].mean() - my)
+    assert dx < 12 and dy < 12, (dx, dy, (mx, my))
+
+    band = out[int(my) - 10:int(my) + 11, int(mx) - 10:int(mx) + 11]
+    assert ((band[:, :, 1] > 200) & (band[:, :, 2] < 160)).any(), "중심 십자가 없다"
+    print(f"10 세로(90°) 렌더 {out.shape[1]}x{out.shape[0]}  "
+          f"착지점 매핑 ({mx:.0f},{my:.0f}) ↔ 블록 중심 오차 ({dx:.0f},{dy:.0f})px")
+
+    out2 = os.path.join(os.environ.get("TMPDIR", "/tmp"), "grasp_ar_rot90.png")
+    cv2.imwrite(out2, out)
+    print(f"   그림: {out2}")

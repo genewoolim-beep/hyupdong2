@@ -52,7 +52,7 @@ python3 hand_gesture_control.py            # 인식만 (로봇 안 붙음)
 | `GESTURE_TASK` | 스크립트와 같은 폴더 | `gesture_recognizer.task` 위치 |
 | `GESTURE_SOURCE` | `v4l2` | 프레임 출처. `v4l2`(장치 직접 열기) 또는 `ros`(토픽 구독) |
 | `GESTURE_CAM_TOPIC` | `/webcam/image_raw` | `GESTURE_SOURCE=ros`일 때 구독할 토픽 |
-| `GESTURE_ROTATE` | `90` | 화면을 반시계로 돌린다 (0/90/180/270). **기본이 세로다** — 지금 설치가 그렇다. 가로로 쓰는 PC 는 `0` |
+| `GESTURE_ROTATE` | `0` | 조작자 웹캠 화면을 반시계로 돌린다. 기본은 안 돌림 — 세로로 돌리는 것은 **리얼센스**다(`REALSENSE_ROTATE`) |
 | `GESTURE_CROP` | `1.0` | 긴 변에서 가운데 이만큼만 남긴다. 기본은 **안 자름** — 자르면 그만큼 시야를 잃는다 |
 | `GESTURE_ROI_CX/CY/R` | `0.22/0.62/0.25` | 십자선 중심·크기. 크기는 **짧은 변** 기준이라 세로 화면에서도 같은 크기다 |
 
@@ -194,6 +194,7 @@ python3 realsense_bridge.py
 | `REALSENSE_TOPIC` | `/camera/camera/color/image_raw` | 구독할 RealSense 컬러 토픽 |
 | `REALSENSE_JPEG` | `70` | JPEG 품질 |
 | `REALSENSE_FPS` | `12` | signbot_admin 전송 상한 fps (모니터링용이라 그 이상 불필요) |
+| `REALSENSE_ROTATE` | `90` | 로봇 시점 화면을 반시계로 돌린다 (0/90/180/270). **기본이 세로** |
 | `GRASP_AR` | `1` | 파지 지점 증강현실. `0` 이면 영상만 중계 |
 | `GRASP_AR_HZ` | `5` | 블록 검출 주기. 그리기는 매 프레임, 검출만 이 주기 |
 | `GRASP_MARGIN` | `6` | 파지 가능으로 볼 한쪽 여유(mm). 벌림 ≥ 블록+2×여유 여야 가능 |
@@ -209,6 +210,12 @@ python3 realsense_bridge.py
 평소        빨간 네모 + "착지점 300mm 아래 — 물 블록 없음"
 블록 들어옴  초록 네모 + "파지 가능 — 빨간색·깊이 (159mm 아래)"
 ```
+
+화면은 **반시계 90°(세로)로 돌려 보낸다**(`REALSENSE_ROTATE`). 판을 내려다보는
+시야가 세로로 길어 그쪽이 보기 낫다. 이때 **기하는 소스 방향에서 계산하고 그리기만
+돌린 좌표에서 한다**(`render`) — 다 그린 뒤 영상을 돌리면 "파지 가능" 글자까지
+같이 눕고, 반대로 영상을 먼저 돌리면 내부파라미터·깊이 영상까지 돌려야 해서 검증된
+계산이 흔들린다. 그래서 점만 옮긴다.
 
 착지점은 하강축이 먼저 닿는 표면이다. 하강축 위의 점이 찍히는 픽셀은 거리에
 따라 옮겨가므로(시차) 한 번에 못 구한다 — 기본 거리로 픽셀을 잡고, 그 픽셀의

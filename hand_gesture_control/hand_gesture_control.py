@@ -64,16 +64,17 @@ HAND_TASK = os.environ.get("GESTURE_TASK", os.path.join(HERE, "gesture_recognize
 GESTURE_SOURCE = os.environ.get("GESTURE_SOURCE", "v4l2").lower()
 GESTURE_CAM_TOPIC = os.environ.get("GESTURE_CAM_TOPIC", "/webcam/image_raw")
 
-# 화면을 반시계로 이만큼 돌린다 (0/90/180/270).
+# 조작자를 찍는 웹캠 화면을 반시계로 이만큼 돌린다 (0/90/180/270).
 #
-# **기본이 90(세로)이다.** 지금 설치가 그렇다 — 이 값이 0 이면 조종 화면이
-# 눕는다(2026-08-07 현장 확인). 가로로 쓰는 PC 에서는 GESTURE_ROTATE=0.
+# **기본은 0 — 돌리지 않는다.** 웹캠은 사람을 가로로 담고 있고, 세로로 돌려야
+# 하는 것은 로봇 시점(리얼센스)이다(realsense_bridge.py 의 REALSENSE_ROTATE).
+# 웹캠을 세로로 세워 다는 설치라면 90 을 준다.
 #
 # **인식보다 먼저 돌린다.** 다 그린 뒤 돌리면 십자선·게이지는 돌아가지만 판정은
 # 안 돌아가서, 화면에서 위로 벗어난 손이 로봇에게는 옆으로 읽힌다.
 # 순서는 회전 → 거울이다. 거울은 조작자 기준 좌우여야 하므로 똑바로 세운 뒤에
 # 뒤집어야 한다.
-GESTURE_ROTATE = int(os.environ.get("GESTURE_ROTATE", 90)) % 360
+GESTURE_ROTATE = int(os.environ.get("GESTURE_ROTATE", 0)) % 360
 _ROT = {90: cv2.ROTATE_90_COUNTERCLOCKWISE, 180: cv2.ROTATE_180,
         270: cv2.ROTATE_90_CLOCKWISE}
 

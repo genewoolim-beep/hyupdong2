@@ -56,6 +56,11 @@ ADMIN_URL = os.environ.get("SIGN_ADMIN_URL", "http://localhost:5000")
 JPEG_QUALITY = int(os.environ.get("REALSENSE_JPEG", 70))
 PUSH_INTERVAL = 1.0 / float(os.environ.get("REALSENSE_FPS", 12))
 USE_AR = os.environ.get("GRASP_AR", "1") != "0"
+
+# 로봇 시점 화면을 반시계로 이만큼 돌린다 (0/90/180/270). **기본이 90(세로)이다** —
+# 판을 내려다보는 시야가 세로로 길어 그쪽이 보기 낫다.
+# AR 은 돌린 좌표에 그린다(grasp_overlay.render) — 다 그린 뒤 돌리면 글자도 눕는다.
+REALSENSE_ROTATE = int(os.environ.get("REALSENSE_ROTATE", 90)) % 360
 AR_INTERVAL = 1.0 / float(os.environ.get("GRASP_AR_HZ", 5))
 
 # 손가락 링크 이름. 벌어진 폭을 여기서 읽는다 — 모드버스로 물어보면 컨트롤러의
@@ -96,7 +101,7 @@ class RealsenseBridge(Node):
             self._tf = self._make_tf()
             self.get_logger().info(
                 f"파지 지점 AR 켜짐 — 깊이 {DEPTH_TOPIC}, 손가락 {FINGER_FRAMES[0]}/"
-                f"{FINGER_FRAMES[1]} ({int(1/AR_INTERVAL)}Hz 검출)")
+                f"{FINGER_FRAMES[1]} ({int(1/AR_INTERVAL)}Hz 검출, 화면 회전 {REALSENSE_ROTATE}°)")
 
         threading.Thread(target=self._sender_loop, daemon=True).start()
         self.get_logger().info(f"{TOPIC} 구독 → {ADMIN_URL}/api/frame/realsense 전송 시작")
@@ -151,9 +156,12 @@ class RealsenseBridge(Node):
             return None
 
     def _draw_ar(self, frame):
-        """파지 구역을 그린다. 그리기는 매 프레임, 블록 검출은 드물게."""
+        """파지 구역을 그리고 **돌린 프레임**을 돌려준다. 못 그리면 그대로 돌려준다.
+
+        그리기는 매 프레임, 블록 검출은 드물게(AR_INTERVAL).
+        """
         if self.view is None or self.view.intr is None:
-            return
+            return self._rotate_only(frame)
         half = self._read_opening()
         if half:
             self.view.set_opening(half)
@@ -168,7 +176,16 @@ class RealsenseBridge(Node):
         # 깊이 한 장을 몇 번 찍어보는 것뿐이라 싸다(landing_z 는 3회 반복).
         with self._lock:
             depth_now = None if self._depth is None else self._depth
-        self.go.draw(frame, self.view, self._blocks, depth=depth_now)
+        out, _hit, _name = self.go.render(frame, self.view, self._blocks,
+                                          depth=depth_now, rotate=REALSENSE_ROTATE)
+        return out
+
+    @staticmethod
+    def _rotate_only(frame):
+        """AR 을 못 그릴 때도 화면 방향은 맞춘다."""
+        flag = {90: cv2.ROTATE_90_COUNTERCLOCKWISE, 180: cv2.ROTATE_180,
+                270: cv2.ROTATE_90_CLOCKWISE}.get(REALSENSE_ROTATE)
+        return frame if flag is None else cv2.rotate(frame, flag)
 
     def _sender_loop(self):
         while rclpy.ok():
@@ -177,12 +194,15 @@ class RealsenseBridge(Node):
             if frame is not None:
                 if USE_AR:
                     try:
-                        self._draw_ar(frame)
+                        frame = self._draw_ar(frame)
                     except Exception as e:
                         # AR 이 터져도 중계는 계속돼야 한다 — 조종자는 영상이라도
-                        # 봐야 한다. 이유는 한 번만 남긴다.
+                        # 봐야 한다. 화면 방향은 그래도 맞춘다.
                         self.get_logger().warn(f"AR 그리기 실패({e}) — 영상만 보냅니다",
                                                once=True)
+                        frame = self._rotate_only(frame)
+                else:
+                    frame = self._rotate_only(frame)
                 ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
                 if ok:
                     try:
