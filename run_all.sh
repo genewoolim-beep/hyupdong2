@@ -44,6 +44,15 @@ export SIGN_SOURCE="${SIGN_SOURCE:-ros}"
 export GESTURE_SOURCE="${GESTURE_SOURCE:-ros}"
 export DISPLAY="${DISPLAY:-:1}"
 
+# 사방이 막힌 블록을 만나면 **로봇이 막는 이웃을 직접 치운다.**
+# block_sort 의 기본값은 꺼짐이다 — 원래 시키지 않은 블록을 집어 옮기는 새 동작이라
+# 실기 검증 전에는 끄기로 했다. 여기서 켜는 것은 **지금 그 검증을 하는 중**이기
+# 때문이다(2026-08-07). 이상하면 이 줄을 지우거나 RELOCATE_BLOCKERS=0 으로 띄운다.
+#
+# 켜면 목적지를 세 가지로 검사한 뒤에만 옮긴다 — 다른 블록과 겹치지 않는지(비전),
+# 구역 안이 아닌지(프리구역으로만), 판 안인지(교시 상자).
+export RELOCATE_BLOCKERS="${RELOCATE_BLOCKERS:-1}"
+
 ALL_TARGETS=(realsense detect webcam admin gui bridge sign)
 DEFAULT_TARGETS=("${ALL_TARGETS[@]}")
 

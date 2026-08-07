@@ -1512,6 +1512,15 @@ class BlockSort(Node):
             ys = [p[1] for p in self.all_zone_xy()]
             m = ZONE_RADIUS + BLOCK_MM
             box = (min(xs) - m, max(xs) + m, min(ys) - m, max(ys) + m)
+        # **구역 안에 버리지 않는다.** 프리구역으로만 치워야 한다 — 구역에 놓으면
+        # is_free 가 그것을 '구역 블록' 으로 보게 되어, 복제가 그 칸을 '이미 놓였다'
+        # 고 판단하거나 본보기를 오독한다. 판을 어지럽히는 쪽으로 고장난다.
+        if not self.is_free(dest):
+            self.get_logger().warn(
+                f"옮길 자리({dest[0]:.0f},{dest[1]:.0f})가 구역 안이라 포기합니다 "
+                f"— 프리구역으로만 치웁니다")
+            push_debug("warn", "파지", "이웃을 치울 자리가 구역 안이라 포기했습니다")
+            return False
         x0, x1, y0, y1 = box
         if not (x0 <= dest[0] <= x1 and y0 <= dest[1] <= y1):
             self.get_logger().warn(
