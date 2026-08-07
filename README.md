@@ -278,7 +278,7 @@ python3 block_sort/sign_command.py run                         # 인식 + 해석
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/ws_cobot_pjt/ws_dsr/install/setup.bash        # 드라이버 (dsr_msgs2 와 짝이 맞는 쪽)
-source ~/doosan-voice-pickandplace/sign_pickandplace/install/setup.bash   # od_msg, object_detection
+source ~/doosan-sign-pickandplace/sign_pickandplace/install/setup.bash   # od_msg, object_detection
 ```
 
 ### 보정
