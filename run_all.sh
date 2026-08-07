@@ -33,7 +33,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BLOCK_DIR="$HERE/block_sort"
 GESTURE_DIR="$HERE/hand_gesture_control"
 ADMIN_DIR="$HERE/signbot_admin"
-WS="$HERE/voice_pickandplace"
+WS="$HERE/sign_pickandplace"
 DSR_WS="${DSR_WS:-$HOME/ws_cobot_pjt/ws_dsr}"
 
 ADMIN_URL="${SIGN_ADMIN_URL:-http://localhost:5000}"

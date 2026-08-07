@@ -60,9 +60,15 @@ DEFAULT_CAM = 0          # 이름으로 못 찾았을 때만 쓰는 최후 기�
 
 LLM_MODEL = os.environ.get("SIGN_LLM_MODEL", "gpt-4o")
 # 저장소에 키를 두지 않으므로 환경변수나 voice_processing 의 .env 에서 읽는다.
+# LLM 키를 둘 자리. 없으면 환경변수(OPENAI_API_KEY)에서 읽는다.
+# 저장소 최상위를 먼저 본다 — 키는 음성이든 수어든 이 저장소 공용이고,
+# 옛 자리(voice_processing/resource)는 음성 코드가 legacy/ 로 빠지면서
+# 뜻이 없어졌다. 옛 자리도 뒤에 남겨 둔다(예전 설치를 깨지 않으려고).
 _ENV_CANDIDATES = [
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                 "voice_pickandplace", "src", "voice_processing", "resource", ".env"),
+                 ".env"),
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                 "legacy", "voice_processing", "resource", ".env"),
 ]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -71,7 +77,7 @@ SIGN_CONTROL_DIR = os.environ.get("SIGN_CONTROL_DIR",
                                   os.path.join(_ROOT, "sign_control"))
 SIGN_PROCESSING_DIR = os.environ.get(
     "SIGN_PROCESSING_SRC",
-    os.path.join(_ROOT, "voice_pickandplace", "src", "sign_processing"))
+    os.path.join(_ROOT, "sign_pickandplace", "src", "sign_processing"))
 
 
 # ── 수어 인식 ───────────────────────────────────────────────────────

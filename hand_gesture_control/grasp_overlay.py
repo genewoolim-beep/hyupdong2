@@ -39,8 +39,7 @@ _ROOT = os.path.dirname(HERE)
 # 핸드아이 행렬 (TCP 기준 카메라 자세). block_sort 와 **같은 파일**을 쓴다 —
 # 두 벌이 되면 한쪽만 재보정했을 때 화면과 실제 파지가 갈라진다.
 HANDEYE = os.environ.get("HANDEYE", os.path.join(
-    _ROOT, "voice_pickandplace", "src", "robot_control", "resource",
-    "T_gripper2camera.npy"))
+    _ROOT, "calib", "T_gripper2camera.npy"))
 
 # TCP 길이(mm). TF 는 플랜지(link_6) 기준으로 손가락 위치를 주고, 핸드아이는
 # TCP 기준이라 그 차이만큼 옮겨야 한다. block_sort 의 EXPECT_TCP_MM 과 같은 값.

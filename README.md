@@ -2,47 +2,71 @@
 
 Doosan M0609 협동로봇을 대상으로 한 프로젝트들. 각 폴더가 독립적으로 빌드·실행된다.
 
+**입력은 수어와 손동작이다 — 음성 인식은 쓰지 않는다.** 음성 시절 코드는
+[`legacy/`](legacy/) 에 있다(지금 플로우가 한 번도 부르지 않는다).
+
 | 폴더 | 프로젝트 | 입력 | 상태 |
 |---|---|---|---|
-| [`voice_pickandplace/`](voice_pickandplace/) | 음성 기반 Pick & Place | 음성 | 동작 확인 |
-| `sign_control/` + `sign_processing` | 수어 기반 로봇 제어 | 수어 | 동작 확인 (물체 인식만) |
+| [`sign_pickandplace/`](sign_pickandplace/) | ROS2 워크스페이스 — 색 검출·웹캠 발행·수어 인식기 | — (라이브러리·노드) | 동작 확인 |
+| `sign_control/` | 수어 데이터 녹화·학습 (`model.pt` 를 만든다) | 수어 | 동작 확인 |
 | [`block_sort/`](block_sort/) | 색 블록 구역 분류 + 배치 복제 **+ 손동작 조종(제어모드)** | 수어 / 손동작 / 텍스트 | 작업모드 실주행 확인 (복제 4/4), 제어모드는 로봇 검증 대기 |
 | [`signbot_admin/`](signbot_admin/) | 관리자 대시보드 (카메라·문장·구역·로봇 상태 통합) | — (Flask 웹) | UI 동작 확인, 로봇 상시 연동은 진행 중 |
 | [`hand_gesture_control/`](hand_gesture_control/) | 손동작 인식·조종 로직 (제어모드의 몸통) | 손동작 | 인식 확인. **로봇 구동은 `block_sort` 안에서 돈다** |
 
 ---
 
-## voice_pickandplace
+## sign_pickandplace (ROS2 워크스페이스)
 
-음성 명령("hello rokey" → "사과 가져와")으로 로봇암이 대상을 찾아 집어 옮긴다.
+정상 동작 플로우가 쓰는 ROS2 패키지만 들어 있다.
 
-```
-음성 → 웨이크워드 → STT → LLM 키워드 추출 → YOLO 검출 → 좌표 변환 → 로봇 동작
-```
+| 패키지 | 무엇 | 누가 쓰는가 |
+|---|---|---|
+| `object_detection` | 색으로 블록을 찾아 3차원 좌표를 주는 노드 (`/get_3d_position`) | `block_sort`, 파지 AR |
+| `od_msg` | 그 서비스 정의 | `object_detection`, `block_sort` |
+| `sign_processing` | 웹캠 → ROS 토픽 발행 + 수어 인식기 | `block_sort`(수어), `hand_gesture_control`(손동작) |
 
-`voice_processing` / `object_detection` / `robot_control` 세 개의 독립 ROS2 패키지로
-구성되어 있어 각각 따로 실행하거나 컨테이너화할 수 있다.
+이름이 `voice_pickandplace` 였던 이유는 이 저장소가 음성 pick & place 로
+시작했기 때문이다. 지금 입력은 수어·손동작이라 이름을 바꿨고, 음성 노드와
+옛 데모는 [`legacy/`](legacy/) 로 옮겼다.
 
-자세한 내용은 [voice_pickandplace/README.md](voice_pickandplace/README.md) 참고.
+> **폴더 이름을 바꾸면 반드시 다시 빌드해야 한다.** `install/` 에 절대경로가
+> 박혀 있어(egg-link, setup.sh) 이름만 바꾸면 옛 경로를 가리킨 채 조용히 옛
+> 코드를 쓴다.
+
+자세한 내용은 [sign_pickandplace/README.md](sign_pickandplace/README.md) 참고.
 
 > `object_detection`은 두 검출기(`YoloModel`/`ColorModel`)를 다 갖고 있고
 > `ObjectDetectionNode(model_name=...)`로 고른다. 현재 **기본값은 `color`**다
-> (아래 `block_sort` 참고). `yolo`로 쓰려면 `model_name='yolo'`를 명시해야
-> 하고, 그 안에서도 `yolo.py`의 `YOLO_MODEL_FILENAME`이 지금 도구 모델
-> (`yolov8n_tools_0122.pt`)로 맞춰져 있어 위 예시("사과 가져와")는 바로
-> 안 된다 — `fruit_best.pt`/`fruit_class_name.json`으로 되돌려야 한다.
+> (아래 `block_sort` 참고).
 
 ---
 
-## sign_control + sign_processing
+## calib — 여러 프로그램이 함께 읽는 보정값
 
-음성 대신 **수어**로 같은 로봇을 제어한다. `sign_processing` 이
-`voice_processing` 의 `/get_keyword` 서비스(`std_srvs/Trigger`)를 그대로
-대체하므로 `robot_control` 은 코드 변경 없이 그대로 쓴다.
+| 파일 | 무엇 | 누가 읽는가 |
+|---|---|---|
+| `T_gripper2camera.npy` | 핸드아이 (카메라 ↔ 그리퍼) | `block_sort`(좌표 변환), `hand_gesture_control`(파지 AR) |
+
+한 프로그램 안에 두면 두 벌이 되고, 한쪽만 재보정하면 **화면과 실제 파지가
+갈라진다.** 그래서 공용 자리에 둔다. 소비자가 하나뿐인 보정값은 그 프로그램
+안에 그대로 있다 — `block_sort/zones.yaml`(구역 교시),
+`block_sort/center_calib.yaml`(파지 중심), `hand_gesture_control/teleop_box.env`(조종 상자).
+
+---
+
+## sign_control (수어 학습)
+
+수어 데이터를 녹화하고 GRU 분류기(`model.pt`)를 학습한다. 그 모델을 실제로
+쓰는 곳은 `block_sort`(수어 명령)와 `sign_pickandplace/src/sign_processing`
+(ROS 서비스 래퍼)이다.
 
 ```
-수어 → MediaPipe 랜드마크 → GRU 분류 → 글로스 → 물체명 매핑 → robot_control
+수어 → MediaPipe 랜드마크 → GRU 분류 → 글로스 → (block_sort 가 LLM 으로 해석)
 ```
+
+`sign_processing` 의 `/get_keyword` 는 음성 시절 `voice_processing` 의 서비스를
+그대로 대체하려고 만든 것이다. 지금 플로우는 그 서비스를 안 쓰고 `block_sort` 가
+인식기를 직접 부른다 — 서비스 경로는 옛 `robot_control`(→ `legacy/`)용이었다.
 
 LLM은 쓰지 않는다 — 분류기가 이미 이산 단어를 출력하므로 문장 파싱이 필요 없다.
 목적지(구역) 인식은 아직 연동하지 않았다 — 이번 범위는 물체 인식만이다.
@@ -59,15 +83,16 @@ LLM은 쓰지 않는다 — 분류기가 이미 이산 단어를 출력하므로
 > 확장해 `block_sort`와 잇는 것이다. 목적지(구역) 인식도 아직 안 붙어 있다.
 
 `sign_control/` 자체(녹화/학습/단독 데모, [sign_control/README.md](sign_control/README.md))는
-그대로 독립 실행되고, `voice_pickandplace/src/sign_processing/` 은 그 학습된
+그대로 독립 실행되고, `sign_pickandplace/src/sign_processing/` 은 그 학습된
 모델을 ROS2 서비스로 감싸는 얇은 레이어다. 모델(`model.pt`)과 mediapipe
 `.task` 파일은 복사하지 않고 `sign_control/` 을 그대로 참조한다
 (`SIGN_CONTROL_DIR` 환경변수로 경로 재정의 가능).
 
 ```bash
-colcon build --symlink-install --packages-select od_msg object_detection sign_processing robot_control
+cd sign_pickandplace
+colcon build --symlink-install --packages-select od_msg object_detection sign_processing
 source install/setup.bash
-SIGN_CAM=0 ros2 run sign_processing get_keyword   # voice_processing 대신
+SIGN_CAM=0 ros2 run sign_processing get_keyword   # 옛 서비스 경로 (지금 플로우는 안 씀)
 ```
 
 카메라 인덱스는 `SIGN_CAM`, 인식 중 카메라 미리보기 창은 `SIGN_SHOW_WINDOW=0`
@@ -83,7 +108,7 @@ SIGN_CAM=0 ros2 run sign_processing get_keyword   # voice_processing 대신
 수어 → GRU 분류 → 글로스 나열 → LLM → (색, 구역) 목록 → 검출 → 파지 → 배치
 ```
 
-`voice_pickandplace` 의 검출 파이프라인(`object_detection` 의 `/get_3d_position`)과
+`sign_pickandplace` 의 검출 파이프라인(`object_detection` 의 `/get_3d_position`)과
 `sign_control` 의 학습된 분류기를 그대로 재사용한다. ROS2 패키지가 아니라
 스크립트라 `colcon build` 없이 바로 돌아간다 — 드라이버와 검출 노드만 떠 있으면 된다.
 
@@ -253,7 +278,7 @@ python3 block_sort/sign_command.py run                         # 인식 + 해석
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/ws_cobot_pjt/ws_dsr/install/setup.bash        # 드라이버 (dsr_msgs2 와 짝이 맞는 쪽)
-source ~/doosan-voice-pickandplace/voice_pickandplace/install/setup.bash   # od_msg, object_detection
+source ~/doosan-voice-pickandplace/sign_pickandplace/install/setup.bash   # od_msg, object_detection
 ```
 
 ### 보정
@@ -320,8 +345,8 @@ python3 block_sort.py pick 빨강 3 --admin    # 옮긴 구역 하나만 반영
 ```
 Ubuntu 22.04 / ROS2 Humble
 Python 3.10
-Doosan M0609 + OnRobot RG2      # voice_pickandplace, block_sort 해당
-Intel RealSense D435i           # voice_pickandplace, block_sort 해당
+Doosan M0609 + OnRobot RG2      # block_sort 해당
+Intel RealSense D435i           # block_sort 해당
 웹캠                             # sign_control
 ```
 
@@ -332,7 +357,7 @@ pip install -r requirements.txt
 `numpy==1.26.4` 와 `mediapipe<1.0` 이 고정되어 있다. 이 둘을 놓치면
 `cv_bridge` 와 ABI 가 충돌해 import 직후 세그폴트가 난다.
 
-`voice_pickandplace` 와 `block_sort` 는 별도로 Doosan 드라이버 워크스페이스
+`sign_pickandplace` 와 `block_sort` 는 별도로 Doosan 드라이버 워크스페이스
 (`dsr_msgs2`, `dsr_bringup2` 등, 보통 `~/cobot_ws`)와
 `ros-humble-realsense2-camera` 가 필요하다. 이 드라이버 워크스페이스가
 비어 있으면 `import DR_init` 단계에서 바로 실패한다.

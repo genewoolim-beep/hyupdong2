@@ -189,16 +189,18 @@ TOOLCHARGER_IP, TOOLCHARGER_PORT = "192.168.1.1", "502"
 HERE = os.path.dirname(os.path.abspath(__file__))
 ZONES_YAML = os.path.join(HERE, "zones.yaml")
 CENTER_YAML = os.path.join(HERE, "center_calib.yaml")   # 손목각별 실측 보정
-# 핸드아이 행렬. 저장소 안의 robot_control 것을 먼저 쓰고, 없으면 환경변수.
+# 핸드아이 행렬. 저장소의 calib/ 것을 먼저 쓰고, 없으면 환경변수.
+# 이 값은 block_sort 와 hand_gesture_control(파지 AR)이 **함께** 읽는다. 그래서
+# 어느 한 프로그램 안이 아니라 저장소 공용 자리에 둔다 — 두 벌이 되면 한쪽만
+# 재보정했을 때 화면과 실제 파지가 갈라진다.
 _HE_DEFAULT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "voice_pickandplace", "src", "robot_control", "resource",
-    "T_gripper2camera.npy")
+    "calib", "T_gripper2camera.npy")
 HANDEYE = os.environ.get("HANDEYE", _HE_DEFAULT)
 # 검출 노드가 아는 색 목록. 색 없이 집을 때 하나씩 물어보려면 필요하다.
 _CR_DEFAULT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "voice_pickandplace", "src", "object_detection", "resource", "color_ranges.json")
+    "sign_pickandplace", "src", "object_detection", "resource", "color_ranges.json")
 COLOR_RANGES_JSON = os.environ.get("COLOR_RANGES", _CR_DEFAULT)
 
 DR_init.__dsr__id = ROBOT_ID

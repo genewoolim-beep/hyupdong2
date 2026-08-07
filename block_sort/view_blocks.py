@@ -32,7 +32,7 @@ from sensor_msgs.msg import CameraInfo, Image
 # 화면이 달라지면 진단 도구로서 의미가 없기 때문이다.
 _OD = os.environ.get("OD_SRC", os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "voice_pickandplace", "src", "object_detection"))
+    "sign_pickandplace", "src", "object_detection"))
 sys.path.insert(0, _OD)
 from object_detection.color_model import (COLOR_HSV_RANGES, MAX_AREA_RATIO,   # noqa: E402
                                           block_candidates, keep_top_face)
@@ -45,8 +45,7 @@ WIN = "blocks"
 HERE = os.path.dirname(os.path.abspath(__file__))
 ZONES_YAML = os.path.join(HERE, "zones.yaml")
 HANDEYE = os.environ.get("HANDEYE", os.path.join(
-    os.path.dirname(HERE), "voice_pickandplace", "src", "robot_control",
-    "resource", "T_gripper2camera.npy"))
+    os.path.dirname(HERE), "calib", "T_gripper2camera.npy"))
 ZONE_RADIUS = float(os.environ.get("ZONE_RADIUS", 45.0))
 ZONE_COLOR = {"robot": (60, 220, 60), "human": (255, 200, 60)}   # BGR
 
