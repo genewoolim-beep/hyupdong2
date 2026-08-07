@@ -31,6 +31,27 @@
     {% block content %}{% endblock %}
   </div>
 
+  {# 엔드이펙터(TCP) 경고. **두 화면 모두**에 걸리게 base 에 둔다 — 작업모드든
+     제어모드든 TCP 가 틀리면 파지 좌표가 그만큼 어긋나고, 제어모드에서는
+     작업영역 경계까지 TCP 기준이라 팔이 판을 향해 내려간다.
+     판정은 block_sort 가 보내는 tcp.ok 를 그대로 쓴다(dashboard.js 의
+     syncTcpAlarm) — 여기서 250 이라는 숫자를 다시 적지 않는다. #}
+  <div id="tcpAlarm" class="alarm-overlay" style="display: none">
+    <div class="alarm-box">
+      <div class="alarm-icon">⚠</div>
+      <div class="alarm-title">엔드이펙터 설정 오류</div>
+      <div class="alarm-value" id="tcpAlarmValue">—</div>
+      <div class="alarm-desc" id="tcpAlarmDesc">
+        티치펜던트에서 공구(TCP)를 다시 설정하세요.
+      </div>
+      <div class="alarm-why">
+        이 상태로 실행하면 <b>파지·배치 좌표가 그만큼 어긋납니다.</b>
+        제어모드에서는 작업영역 경계도 함께 밀려 팔이 판을 향해 내려갑니다.
+      </div>
+      <button class="btn btn-danger alarm-close" id="tcpAlarmClose">확인했습니다</button>
+    </div>
+  </div>
+
   <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
   {% block scripts %}{% endblock %}
 </body>

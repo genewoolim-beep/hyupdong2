@@ -53,7 +53,10 @@ robot_state = {
 control_alive = {"at": None}
 
 hardware_state = {
-    "tcp": {"name": None, "length_mm": None, "offset_mm": None},
+    # tcp 는 block_sort 가 보고한다. ok/expect_mm 은 **보고하는 쪽이 판정한 결과**다 —
+    # 여기서 다시 판단하지 않는다(문턱이 두 곳에 적히면 한쪽만 고쳐진다).
+    "tcp": {"name": None, "length_mm": None, "offset_mm": None,
+            "expect": None, "expect_mm": None, "tol_mm": None, "ok": None},
     "cameras": {"realsense": False, "webcam": False, "detection": False},
     "updated_at": None,
 }

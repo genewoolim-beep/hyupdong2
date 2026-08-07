@@ -345,18 +345,14 @@ def ensure_tcp(logger=None):
         (logger.warn if logger else print)(msg)
 
     def ok_now():
-        """이름과 **길이**가 둘 다 맞는가.
+        """이름과 **길이**가 둘 다 맞는가. 판정은 tcp_info 한 곳에서 한다.
 
         이름만 보면 부족하다. 이름이 남아 있어도 실제 오프셋이 풀려 길이가
         0 으로 읽히는 경우가 있다 — 그 상태로 파지하면 좌표가 250mm 어긋난다.
         길이는 TCP 좌표와 플랜지 좌표의 차이로 잰다(tcp_info 참고).
         """
-        name = get_tcp()
         info = tcp_info()
-        length = info.get("length_mm")
-        good = (isinstance(name, str) and name == EXPECT_TCP
-                and length is not None and abs(length - EXPECT_TCP_MM) <= TCP_TOL_MM)
-        return good, name, length
+        return bool(info.get("ok")), info.get("name"), info.get("length_mm")
 
     try:
         good, name, length = ok_now()
@@ -396,14 +392,24 @@ def tcp_info():
             name = get_tcp()
         except Exception:
             name = None
+        # **기대값과 판정도 함께 보낸다.** 대시보드가 '250mm 인지' 를 스스로 판단하면
+        # 문턱이 두 곳에 적히고, 한쪽만 고쳤을 때 화면이 조용히 거짓말을 한다.
+        # 판정은 여기 한 곳에서만 한다(ensure_tcp 도 이 값을 쓴다).
+        ok = (isinstance(name, str) and name == EXPECT_TCP
+              and abs(length - EXPECT_TCP_MM) <= TCP_TOL_MM)
         # error 를 항상 실어 보낸다. 대시보드가 부분 갱신(update)이라, 성공했을 때
         # 이 키를 빼면 지난 실패의 메시지가 그대로 남아 붙어 있는다.
         return {"name": name if isinstance(name, str) else None,
                 "length_mm": round(length, 1),
                 "offset_mm": [round(v, 1) for v in d],
+                "expect": EXPECT_TCP, "expect_mm": EXPECT_TCP_MM,
+                "tol_mm": TCP_TOL_MM, "ok": bool(ok),
                 "error": None}
     except Exception as e:
-        return {"name": None, "length_mm": None, "offset_mm": None, "error": str(e)}
+        return {"name": None, "length_mm": None, "offset_mm": None,
+                "expect": EXPECT_TCP, "expect_mm": EXPECT_TCP_MM,
+                "tol_mm": TCP_TOL_MM, "ok": False,
+                "error": str(e)}
 
 
 def control_taken():

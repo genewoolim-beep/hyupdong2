@@ -44,6 +44,8 @@
           : Number(t.length_mm).toFixed(1) + " mm" + (t.name ? " · " + t.name : "");
       }
 
+      syncTcpAlarm(hw.tcp);
+
       const camEl = document.getElementById("statCams");
       if (camEl) {
         const c = hw.cameras || {};
@@ -103,8 +105,13 @@
 
     const banner = document.getElementById("modeBanner");
     if (banner) banner.className = "panel mode-banner mode-banner-" + data.mode;
+    // 제어 화면 제목의 "제어 화면: 작업모드" 부분. 색으로도 모드를 알린다 —
+    // 큰 배너를 없앴으니(카메라가 한 화면에 들어와야 한다) 이 한 줄이 그 몫이다.
     const bannerValue = document.getElementById("modeBannerValue");
-    if (bannerValue) bannerValue.textContent = label;
+    if (bannerValue) {
+      bannerValue.textContent = label;
+      bannerValue.className = "page-title-mode mode-" + data.mode;
+    }
     const hint = document.getElementById("modeBannerHint");
     if (hint) {
       hint.textContent =
@@ -297,6 +304,54 @@
       estop.addEventListener("click", () => {
         if (confirm("비상정지를 실행하시겠습니까?")) sendControl("e_stop");
       });
+  }
+
+  // 엔드이펙터(TCP) 가 틀리면 화면을 덮는 큰 경고를 띄운다.
+  //
+  // **판정은 여기서 하지 않는다.** block_sort 가 보내는 tcp.ok 를 그대로 쓴다
+  // (tcp_info 가 이름과 길이를 같이 본다). 여기서 "250mm 인가" 를 다시 적으면
+  // 문턱이 두 곳에 생기고, 한쪽만 고쳤을 때 화면이 조용히 거짓말을 한다.
+  //
+  // 보고가 아직 없으면(length_mm 없음) 경고하지 않는다 — 그건 '틀렸다' 가 아니라
+  // '로봇 프로그램이 아직 안 떴다' 는 뜻이다.
+  let tcpAlarmDismissed = null;      // 사용자가 확인한 값(같은 값이면 다시 안 띄운다)
+
+  function syncTcpAlarm(t) {
+    const box = document.getElementById("tcpAlarm");
+    if (!box) return;
+    const reported = t && t.length_mm !== null && t.length_mm !== undefined;
+    const bad = reported && t.ok === false;
+    if (!bad) {
+      box.style.display = "none";
+      tcpAlarmDismissed = null;      // 정상으로 돌아왔다 — 다음에 틀리면 다시 띄운다
+      return;
+    }
+    const key = String(t.name) + "/" + String(t.length_mm);
+    if (tcpAlarmDismissed === key) return;
+
+    const val = document.getElementById("tcpAlarmValue");
+    if (val) {
+      val.textContent = Number(t.length_mm).toFixed(1) + " mm"
+        + (t.name ? "  ·  " + t.name : "  ·  이름 없음");
+    }
+    const desc = document.getElementById("tcpAlarmDesc");
+    if (desc && t.expect_mm) {
+      desc.innerHTML = "티치펜던트에서 공구(TCP)를 <b>"
+        + (t.expect || "") + " / " + Number(t.expect_mm).toFixed(0)
+        + "mm</b> 로 설정하세요.";
+    }
+    box.style.display = "flex";
+    // 지금 값을 요소에 적어 둔다. 닫기 버튼은 한 번만 묶으므로, key 를 클로저로
+    // 잡으면 **처음 값에 굳어** 다음 오류를 닫았을 때 엉뚱한 값을 기억한다.
+    box.dataset.key = key;
+    const btn = document.getElementById("tcpAlarmClose");
+    if (btn && !btn.dataset.bound) {
+      btn.dataset.bound = "1";
+      btn.addEventListener("click", () => {
+        tcpAlarmDismissed = box.dataset.key;
+        box.style.display = "none";
+      });
+    }
   }
 
   // 카메라 안내문("아직 연결되지 않았습니다")은 **영상이 없을 때만** 보여준다.
