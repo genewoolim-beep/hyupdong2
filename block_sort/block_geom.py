@@ -95,6 +95,27 @@ def approach_gap(target_xy, axis_deg, neighbors, block_mm=BLOCK_MM,
     return best
 
 
+def fold_turn(last_rot, turn):
+    """회피 회전을 **손목이 덜 돌아가는 쪽**으로 접는다. 돌려줄 값은 +turn 또는 -turn.
+
+    +90 과 -90 은 **같은 물림**이다 — 그리퍼가 닫히는 것은 직선(축)이라 180°
+    차이는 손가락 좌우만 바꾸고, 정사각 블록은 어차피 90° 대칭이다. 그런데
+    best_axis 는 늘 +90 만 준다. 손목이 이미 돌아 있으면 그 +90 이 관절 한계를
+    넘긴다.
+
+    실측 2026-08-08: 기울기 41° 인 보라가 손목 +131°(GRASP_ROT 90 + 41) 였는데
+    +90 을 더해 **+221°** 가 되어 "블록 위로 접근하지 못해 파지를 중단합니다" 로
+    죽었다 — 같은 배치에서 두 번, 초록까지 같이 실패했다. -90 을 골랐으면
+    +41° 라 아무 문제가 없었다.
+
+    fold90 이 '45° 넘게 돌 일이 없다' 고 보장하는 것은 **블록 기울기까지**다.
+    GRASP_ROT(+90)과 이 회피 회전은 그 위에 더해지므로 그 보장이 깨진다.
+    """
+    if not turn:
+        return turn
+    return turn if abs(last_rot + turn) <= abs(last_rot - turn) else -turn
+
+
 def best_axis(target_xy, axis_deg, neighbors, finger_t=FINGER_T, **kw):
     """축을 그대로 둘지 90° 돌릴지 고른다. (돌릴 각도, 그 축의 틈, 원래 축의 틈)
 
@@ -198,6 +219,49 @@ def _blocking_color(color, xy, axis_deg, all_pts, finger_t=FINGER_T):
                 if abs(x - bxy[0]) < 1.0 and abs(y - bxy[1]) < 1.0), None)
 
 
+def pick_order(pts, all_pts, finger_t=FINGER_T, self_r=30.0):
+    """같은 색 후보들을 **집기 쉬운 순**으로 다시 늘어놓는다.
+
+    pts      [(x, y, 파지축deg), ...] — 그 색의 후보들. 축은 그 블록 자신의
+             검출 기울기에서 나온 것이어야 한다(놓을 때 각도가 아니다).
+    all_pts  [(x, y), ...] — 지금 판에서 본 **모든** 블록. 후보 자신도 들어
+             있어도 된다(자기 자신은 아래 self_r 로 걸러진다).
+    self_r   이 반경 안의 점은 **이웃이 아니라 자기 자신**으로 본다(기본 30mm,
+             block_sort.SELF_R 과 같은 값). 35mm 블록 둘이 30mm 안에 있을 수는
+             없으므로, 그런 점은 같은 물리 블록을 두 번 본 것이다.
+
+             **없으면 유령이 진짜 방해물로 잡힌다.** 실측 2026-08-08: 빨강
+             (519,85) 와 주황 (532,78) 이 중심거리 14.8mm 로 보고됐다(색상값이
+             인접해 한 블록을 둘로 검출한 것이다). 그 유령 탓에 주황의 틈이
+             -22mm(겹침)로 나와 '완전히 막힘' 으로 판정됐고, 계획 1번이던
+             주황이 맨 뒤로 밀렸다. 정작 실제 파지는 neighbors_xy 가 SELF_R 로
+             그것을 걸러내고 멀쩡히 집었다 — 판단과 실행이 어긋난 것이다.
+
+    **왜 필요한가.** 검출 노드는 신뢰도 순으로 답하고, 부르는 쪽은 그 첫 번째를
+    집었다. 그런데 신뢰도와 집기 쉬움은 아무 상관이 없다 — 사방이 포위된 블록이
+    1등이면 바로 옆에 뻥 뚫린 같은 색을 두고도 그 포위된 것을 집으려 든다.
+    그러면 이웃 치우기가 통째로 발동하고, 실패하면 사람에게 치워 달라고 한다.
+    고를 수 있을 때 고르는 것이 치우기보다 언제나 싸다.
+
+    점수는 best_axis 의 틈이다(손목 90° 회전까지 본 뒤의 값). 동점이면 원래
+    순서를 지킨다 — 신뢰도 순을 이유 없이 흔들지 않기 위해서다.
+    """
+    import numpy as np
+
+    def gap_of(p):
+        x, y = p[0], p[1]
+        axis = p[2] if len(p) > 2 else 0.0
+        others = [(ox, oy) for ox, oy in all_pts
+                  if np.hypot(ox - x, oy - y) >= self_r]
+        _turn, gap, _g0 = best_axis((x, y), axis, others, finger_t=finger_t)
+        return gap
+
+    scored = [(gap_of(p), i, p) for i, p in enumerate(pts)]
+    # 틈이 큰 것부터. 같으면 원래 순서(i)를 지킨다.
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    return [p for _g, _i, p in scored]
+
+
 def reorder_for_conflicts(plan, positions, finger_t=FINGER_T):
     """plan을 막힘 관계를 반영해 재정렬한다 — 막는 색을 먼저 오게 한다.
 
@@ -299,6 +363,114 @@ def graspable_blocker(target_xy, axis_deg, neighbors, finger_t=FINGER_T, **kw):
     return best_xy
 
 
+# 막는 블록을 **잡은 채로 끄는** 거리(mm). 들었다 놓지 않는다.
+#
+# 왜 파지축의 **직각**인가. 손가락이 지나가는 길(레인)은 파지축을 따라 나 있고
+# 반폭이 LANE_HALF 다. 축을 따라 멀리 밀려면 중심거리 67mm 를 만들어야 하지만,
+# 옆으로 빼면 레인 밖(29.5mm)으로만 나가면 된다 — 훨씬 짧다. 목표에서 보면
+# 그 블록이 **대각선**으로 비켜난 자리가 된다.
+#
+# 60mm 인 이유: 레인을 벗어나는 데 필요한 최대치가 34mm(축 위에 딱 걸친 경우)
+# 인데, 거기서 끝내면 **직각 축**의 레인에 새로 걸릴 수 있다. 60mm 면 두 축
+# 모두에서 확실히 벗어난다 — 검증: 축 위/옆 어디에 있든 끌고 나면 두 축 다 inf.
+SLIDE_MM = 60.0
+
+
+def seg_dist(p, a, b):
+    """점 p 에서 선분 a→b 까지의 거리. 끌고 가는 길에 뭐가 있는지 볼 때 쓴다."""
+    import numpy as np
+    ax, ay, bx, by = a[0], a[1], b[0], b[1]
+    vx, vy = bx - ax, by - ay
+    L2 = vx * vx + vy * vy
+    if L2 < 1e-9:
+        return float(np.hypot(p[0] - ax, p[1] - ay))
+    t = max(0.0, min(1.0, ((p[0] - ax) * vx + (p[1] - ay) * vy) / L2))
+    return float(np.hypot(p[0] - (ax + t * vx), p[1] - (ay + t * vy)))
+
+
+def slide_dests(target_xy, blocker_xy, axis_deg, others=(), dist=SLIDE_MM,
+                finger_t=FINGER_T, block_mm=BLOCK_MM, lane_half=LANE_HALF,
+                clear_extra=5.0, check_path=True):
+    """blocker 를 파지축 **직각**으로 dist 만큼 끌 자리 후보들 — 좋은 순.
+
+    들었다 놓는 것(relocate_candidates)과 달리 **잡은 채로 끄는** 것이라,
+    지나가는 길이 비어 있어야 한다. 블록이 훑고 가는 복도에 다른 블록이 있으면
+    그것까지 밀려 판이 무너진다 — 그런 방향은 빼고 돌려준다.
+
+    두 방향(+직각, -직각) 중 **목표에서 멀어지는 쪽**을 먼저 본다. 목표 쪽으로
+    끌면 지나가는 길이 목표를 스칠 수 있다.
+
+    others 에는 blocker 자신을 넣어도 된다(같은 자리는 자기 자신으로 본다).
+    목표(target_xy)는 넣지 않아도 여기서 함께 본다 — 끌다가 목표를 치면 안 된다.
+    """
+    import numpy as np
+    b = np.asarray(blocker_xy, float)
+    t = np.asarray(target_xy, float)
+    perp = np.array([-np.sin(np.radians(axis_deg)), np.cos(np.radians(axis_deg))])
+    # blocker 가 목표에서 어느 쪽으로 치우쳐 있나 — 그쪽으로 더 밀어낸다.
+    lean = float(perp @ (b - t))
+    signs = (1.0, -1.0) if lean >= 0 else (-1.0, 1.0)
+
+    obstacles = [(float(o[0]), float(o[1])) for o in others
+                 if not (abs(o[0] - b[0]) < 1.0 and abs(o[1] - b[1]) < 1.0)]
+    obstacles.append((float(t[0]), float(t[1])))
+    out = []
+    for s in signs:
+        d = b + s * dist * perp
+        dxy = (float(d[0]), float(d[1]))
+        # ① 끌고 난 자리가 더는 목표를 막지 않아야 한다 (두 축 모두)
+        if (approach_gap(target_xy, axis_deg, [dxy], block_mm=block_mm,
+                         lane_half=lane_half) < finger_t
+                or approach_gap(target_xy, axis_deg + 90.0, [dxy],
+                                block_mm=block_mm, lane_half=lane_half) < finger_t):
+            continue
+        # ② 훑고 가는 복도가 비어 있어야 한다. 블록 한 변이면 중심이 그만큼
+        #    떨어져 있어도 모서리가 스친다 — 여유를 조금 더 준다.
+        #
+        #    **지금보다 가까워질 때만** 막는다. 막고 있는 블록은 정의상 목표에
+        #    바싹 붙어 있어서(그러니까 막은 것이다), 절대 거리로 재면 목표 자신
+        #    때문에 모든 방향이 거부된다 — 실제로 38mm 옆 목표 때문에 양쪽 다
+        #    막혔다. 끌기가 사이를 **더 좁히지 않으면** 통과시킨다.
+        if not check_path:
+            out.append(dxy)                # 길은 안 본다 — 잡히면 끈다
+            continue
+        clear = block_mm + clear_extra
+        bad = False
+        for o in obstacles:
+            d0 = float(np.hypot(o[0] - b[0], o[1] - b[1]))
+            if seg_dist(o, blocker_xy, dxy) < min(clear, d0) - 1e-6:
+                bad = True
+                break
+        if bad:
+            continue
+        out.append(dxy)
+    return out
+
+
+def axis_blockers(target_xy, axis_deg, neighbors, finger_t=FINGER_T, **kw):
+    """이 축을 막는 이웃 **전부**를, 자기 자신이 집기 쉬운 순으로.
+
+    돌려주는 것: [(xy, room, 집을수있나), ...] — room 이 큰 것부터.
+
+    graspable_blocker 는 '집을 수 있는 것 중 최선' 하나만 준다. 그것 하나를
+    집다 실패하면 치우기가 통째로 죽는데, 막는 이웃이 여럿이면 **다음 것을
+    시도해 볼 수 있다.** 그리고 아무도 못 집는 뭉치라도, 가장 덜 갇힌 것을
+    골라 **그 블록의 방해물부터** 치우면 한 단계 더 파고들 수 있다.
+    포기하기 전에 해볼 것을 다 해보기 위한 목록이다.
+    """
+    pts = [(float(n[0]), float(n[1])) for n in neighbors]
+    out = []
+    for i, b in enumerate(pts):
+        if approach_gap(target_xy, axis_deg, [b], **kw) >= finger_t:
+            continue                       # 이 축을 안 막는다 — 치워도 헛수고
+        others = [p for j, p in enumerate(pts) if j != i] + [tuple(target_xy)]
+        room = max(approach_gap(b, axis_deg, others, **kw),
+                   approach_gap(b, axis_deg + 90.0, others, **kw))
+        out.append((b, room, room >= finger_t))
+    out.sort(key=lambda t: -t[1])
+    return out
+
+
 # 임시로 치워 두는 자리에 요구할 최소 중심거리(mm). 파지 여유(블록+손가락=62)를
 # 요구하면 꽉 찬 판에서는 사실상 자리가 없다 — 실측 2026-08-07: 옮길 자리에서
 # 51.6mm 떨어진(즉 16mm 떨어져 겹치지도 않는) 블록 때문에 포기했다.
@@ -307,9 +479,17 @@ def graspable_blocker(target_xy, axis_deg, neighbors, finger_t=FINGER_T, **kw):
 RELOCATE_CLEAR_MIN = BLOCK_MM + 8.0
 
 
+# 가까운 후보가 다 막혔을 때 **넓게 훑을** 반경들(mm)과 방향 수.
+# 최소 이동만 보는 후보 다섯은 꽉 찬 판에서 전부 막히기 쉽다 — 그러면 치우기가
+# 통째로 무산된다. 임시로 치워 두는 자리일 뿐이니, 판을 좀 어지럽히더라도
+# **멀리라도 던질 수 있으면 던지는** 편이 포기보다 낫다.
+RELOCATE_WIDE_R = (80.0, 120.0, 170.0, 230.0)
+RELOCATE_WIDE_DIRS = 12          # 30° 간격
+
+
 def relocate_candidates(target_xy, blocker_xy, axis_deg, finger_t=FINGER_T,
                         block_mm=BLOCK_MM, margin=RELOCATE_MARGIN,
-                        lane_half=LANE_HALF):
+                        lane_half=LANE_HALF, wide=True):
     """blocker 를 치울 자리 후보들을 **좋은 순서로** 돌려준다.
 
     한 곳만 계산해서 그 자리가 막혀 있으면 포기하던 것을 고치기 위한 것이다
@@ -320,6 +500,10 @@ def relocate_candidates(target_xy, blocker_xy, axis_deg, finger_t=FINGER_T,
       ② 축과 **직각**으로 밀기   — 손가락 지나가는 길(lane)에서 빼면 되므로
                                  보통 ①보다 짧게 움직인다
       ③ 더 멀리 / 대각선        — 앞이 다 막혔을 때
+      ④ wide 면 **사방으로 넓게** — 위 다섯이 다 막혔을 때. blocker 를 중심으로
+                                 반경을 키워 가며 빙 둘러 본다. 가까운 반경부터,
+                                 같은 반경에서는 **목표 반대쪽 방향부터** 본다
+                                 (목표 주변을 다시 어지럽히지 않는 쪽이다).
 
     후보는 **그 블록이 더는 목표를 막지 않는 자리**만 남긴다(두 축 모두에서).
     실제로 비었는지·구역인지·판 안인지는 비전이 있는 부르는 쪽이 본다.
@@ -349,9 +533,24 @@ def relocate_candidates(target_xy, blocker_xy, axis_deg, finger_t=FINGER_T,
         if need_side > 0:                                   # 대각선
             out.append(b + s_along * need_along * ax + s_side * need_side * perp)
 
-    keep = []
+    if wide:
+        # 목표에서 blocker 로 향하는 방향 — 여기에 가까운 쪽이 '목표 반대쪽' 이다.
+        away = d / (np.linalg.norm(d) or 1.0)
+        for rad in RELOCATE_WIDE_R:
+            ring = []
+            for k in range(RELOCATE_WIDE_DIRS):
+                th = 2 * np.pi * k / RELOCATE_WIDE_DIRS
+                u = np.array([np.cos(th), np.sin(th)])
+                ring.append((-float(away @ u), b + rad * u))
+            ring.sort(key=lambda t: t[0])       # 목표 반대쪽 방향부터
+            out += [p for _s, p in ring]
+
+    keep, seen = [], []
     for c in out:
         c = (float(c[0]), float(c[1]))
+        if any(np.hypot(c[0] - s[0], c[1] - s[1]) < 1.0 for s in seen):
+            continue                            # 넓은 훑기는 같은 자리를 다시 낼 수 있다
+        seen.append(c)
         if (approach_gap(target_xy, axis_deg, [c], block_mm=block_mm,
                          lane_half=lane_half) >= finger_t
                 and approach_gap(target_xy, axis_deg + 90.0, [c], block_mm=block_mm,
