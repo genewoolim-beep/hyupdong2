@@ -2,14 +2,14 @@
 
 Doosan M0609 협동로봇을 대상으로 한 프로젝트들. 각 폴더가 독립적으로 빌드·실행된다.
 
-**입력은 수어와 손동작이다 — 음성 인식은 쓰지 않는다.** 음성 시절 코드는
-[`legacy/`](legacy/) 에 있다(지금 플로우가 한 번도 부르지 않는다).
+**입력은 수어·손동작·음성이다.** `legacy/`의 예전 음성 pick&place 코드와는
+별개로, `block_sort`가 자체 음성모드(`voice_command.py`)를 갖고 있다.
 
 | 폴더 | 프로젝트 | 입력 | 상태 |
 |---|---|---|---|
 | [`sign_pickandplace/`](sign_pickandplace/) | ROS2 워크스페이스 — 색 검출·웹캠 발행·수어 인식기 | — (라이브러리·노드) | 동작 확인 |
 | `sign_control/` | 수어 데이터 녹화·학습 (`model.pt` 를 만든다) | 수어 | 동작 확인 |
-| [`block_sort/`](block_sort/) | 색 블록 구역 분류 + 배치 복제 **+ 손동작 조종(제어모드)** | 수어 / 손동작 / 텍스트 | 작업모드 실주행 확인 (복제 4/4), 제어모드는 로봇 검증 대기 |
+| [`block_sort/`](block_sort/) | 색 블록 구역 분류 + 배치 복제 **+ 손동작 조종(제어모드) + 음성모드** | 수어 / 손동작 / 음성 / 텍스트 | 작업모드 실주행 확인 (복제 4/4), 제어모드는 로봇 검증 대기 |
 | [`signbot_admin/`](signbot_admin/) | 관리자 대시보드 (카메라·문장·구역·로봇 상태 통합) | — (Flask 웹) | UI 동작 확인, 로봇 상시 연동은 진행 중 |
 | [`hand_gesture_control/`](hand_gesture_control/) | 손동작 인식·조종 로직 (제어모드의 몸통) | 손동작 | 인식 확인. **로봇 구동은 `block_sort` 안에서 돈다** |
 
@@ -442,6 +442,25 @@ python3 hand_gesture_control/teach_box.py     # 두 모서리를 찍어 teleop_b
 
 `hand_gesture_control.py` 를 따로 띄우는 것은 **인식 확인용**이다. 작업모드와
 함께 쓸 때 `--robot` 을 붙이면 DSR 연결이 둘로 돌아가므로 붙이지 않는다.
+
+### 음성모드 — 말로 명령하기
+
+대시보드 "음성모드 진입" 버튼으로 들어간다(음성으로는 진입 안 됨 — work
+모드 내내 배경 마이크를 켜둬야 했고 화면 안내문과 겹쳐 헷갈려서 뺐다).
+"hello rokey" 웨이크워드로 듣기 시작해 명령 문장을 인식하고, **"실행"이라고
+한 번 더 확인해야** 로봇이 움직인다 — 수어보다 어휘가 자유로운 만큼
+오인식 위험이 커서 넣은 안전장치. 복귀는 음성 "작업모드" 또는 대시보드
+버튼.
+
+제어모드와 같은 이유로 같은 프로세스 안에서 돈다 — DSR 연결을 또 하나
+열면 안 되기 때문(위 "왜 한 프로세스인가" 참고). 자세한 구조는
+[`block_sort/voice_command.py`](block_sort/voice_command.py) 참고.
+
+```bash
+python3 block_sort.py sign --admin   # 대시보드에서 "음성모드 진입" 버튼으로 전환
+python3 voice_command.py watch       # 로봇 없이 인식·해석만 콘솔로 확인
+python3 voice_command.py watch-gui   # 로봇 없이 같은 화면(카메라 창)으로 확인
+```
 
 ### signbot_admin 연동
 
