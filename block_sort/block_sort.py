@@ -2204,7 +2204,7 @@ class BlockSort(Node):
                     while time.time() < deadline and not watch["stop"]:
                         reply = vc.listen_once(
                             should_stop=lambda: watch["stop"] or time.time() >= deadline,
-                            on_level=set_level)
+                            on_level=set_level, require_wake=False)
                         if not reply:
                             break    # 시간 초과나 대시보드 강제 전환
                         if vc.is_confirm(reply):

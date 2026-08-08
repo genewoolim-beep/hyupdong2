@@ -167,10 +167,16 @@ class MicConfig:
 
 
 class MicController:
-    """legacy/voice_processing/voice_processing/MicController.py 그대로.
+    """legacy/voice_processing/voice_processing/MicController.py 에서 확장.
 
     웨이크워드 감지 동안 스트림을 계속 읽는 용도다. 실제 명령 문장은
     STT가 sounddevice로 따로 녹음한다(legacy 구조 그대로 — 아래 STT 참고).
+
+    PyAudio 호스트(self.audio)는 첫 open_stream() 에서 한 번만 만들고
+    close_stream() 에서는 스트림만 닫는다 — 원래는 매 발화마다 호스트를
+    새로 띄웠다(pyaudio.PyAudio() 는 드라이버 열거를 포함해 비용이 있다).
+    _Engine 이 이 인스턴스를 세션 내내 재사용하므로 호스트는 프로세스가
+    끝날 때까지 살아있어도 된다.
     """
 
     def __init__(self, config: MicConfig = None):
@@ -182,8 +188,9 @@ class MicController:
 
     def open_stream(self):
         import pyaudio
-        self.audio = pyaudio.PyAudio()
-        self.sample_width = self.audio.get_sample_size(self.config.fmt)
+        if self.audio is None:
+            self.audio = pyaudio.PyAudio()
+            self.sample_width = self.audio.get_sample_size(self.config.fmt)
         self.stream = self.audio.open(
             format=self.config.fmt,
             channels=self.config.channels,
@@ -196,9 +203,7 @@ class MicController:
         if self.stream:
             self.stream.stop_stream()
             self.stream.close()
-        if self.audio:
-            self.audio.terminate()
-            self.audio = None
+            self.stream = None
 
 
 class WakeupWord:
@@ -238,13 +243,18 @@ class WakeupWord:
         return confidence > WAKE_THRESHOLD
 
     def set_stream(self, stream):
-        from openwakeword.model import Model
-        if not os.path.exists(WAKE_MODEL_PATH):
-            sys.exit(
-                f"웨이크워드 모델이 없습니다: {WAKE_MODEL_PATH}\n"
-                f"  legacy/voice_processing/resource/hello_rokey_8332_32.tflite 를 "
-                f"block_sort/ 로 복사하세요.")
-        self.model = Model(wakeword_models=[WAKE_MODEL_PATH])
+        if self.model is None:
+            # .tflite 로딩 + 추론기 초기화는 한 번이면 된다 — 원래는 매
+            # set_stream() 호출(즉 매 발화)마다 다시 만들어서 명령 하나에
+            # 몇 초씩 지연이 낍니다. self 가 _Engine 에 물려 세션 내내
+            # 살아있으므로 여기서 한 번 캐싱해두면 그다음부터는 재사용된다.
+            from openwakeword.model import Model
+            if not os.path.exists(WAKE_MODEL_PATH):
+                sys.exit(
+                    f"웨이크워드 모델이 없습니다: {WAKE_MODEL_PATH}\n"
+                    f"  legacy/voice_processing/resource/hello_rokey_8332_32.tflite 를 "
+                    f"block_sort/ 로 복사하세요.")
+            self.model = Model(wakeword_models=[WAKE_MODEL_PATH])
         self.stream = stream
 
 
@@ -295,10 +305,11 @@ class _Engine:
             sys.exit("OPENAI_API_KEY 가 없습니다 — 음성 인식은 STT(Whisper)에 "
                       "키가 필요합니다. 저장소 최상위 .env 를 확인하세요.")
         self.mic_cfg = MicConfig()
+        self.mic = MicController(self.mic_cfg)   # 세션 내내 재사용 (PyAudio 호스트 유지)
         self.wake = WakeupWord(self.mic_cfg.buffer_size)
         self.stt = STT(openai_api_key=key)
 
-    def listen(self, should_stop=None, on_level=None, on_wake=None):
+    def listen(self, should_stop=None, on_level=None, on_wake=None, require_wake=True):
         """웨이크워드 대기 → 녹음 → STT. 문장 텍스트를 돌려준다.
 
         should_stop 은 대시보드에서 강제로 모드를 바꿨을 때 이 대기를 빨리
@@ -313,23 +324,33 @@ class _Engine:
         불린다 — "hello rokey 라고 불러주세요" 안내문을 그 시점에 "듣는
         중..."으로 바꿔주는 용도. 이게 없으면 대기 중과 실제 녹음 중을
         화면만 보고 구분할 수 없었다.
+
+        require_wake=False 면 웨이크워드 대기를 건너뛰고 바로 녹음한다 —
+        명령을 이미 한 번 인식한 직후에 "실행"이라고 확인만 받는 자리
+        (run_voice() 의 확인 단계)에서 쓴다. 이걸 안 주면 확인 단계도
+        "hello rokey"부터 다시 불러야 하는데, 화면엔 그 안내가 없어서
+        실사용에서 계속 타임아웃으로 취소되는 문제가 있었다.
         """
-        mic = MicController(self.mic_cfg)
+        if not require_wake:
+            return self.stt.speech2text()
+
         try:
-            mic.open_stream()
+            self.mic.open_stream()
         except OSError as e:
             print(f"마이크를 열지 못했습니다: {e}")
             return None
-        self.wake.set_stream(mic.stream)
-        print("웨이크워드 대기 중 ('hello rokey')...")
-        while not self.wake.is_wakeup(on_level=on_level):
-            if should_stop is not None and should_stop():
-                mic.close_stream()
-                return None
-        print("웨이크워드 감지!")
-        if on_wake is not None:
-            on_wake()
-        mic.close_stream()   # STT가 sounddevice로 다시 열기 전에 장치를 비워준다
+        try:
+            self.wake.set_stream(self.mic.stream)
+            print("웨이크워드 대기 중 ('hello rokey')...")
+            while not self.wake.is_wakeup(on_level=on_level):
+                if should_stop is not None and should_stop():
+                    return None
+            print("웨이크워드 감지!")
+            if on_wake is not None:
+                on_wake()
+        finally:
+            self.mic.close_stream()   # STT가 sounddevice로 다시 열기 전에 장치를 비워준다
+                                       # (예외로 빠져나가도 항상 닫는다)
         return self.stt.speech2text()
 
 
@@ -340,7 +361,7 @@ def _get_engine():
     return _engine
 
 
-def listen_once(should_stop=None, on_level=None, on_wake=None):
+def listen_once(should_stop=None, on_level=None, on_wake=None, require_wake=True):
     """웨이크워드 대기 → 녹음 → STT. 문장 텍스트만 돌려준다 (해석은 안 함).
 
     should_stop 은 _Engine.listen() 참고 — 대시보드 강제 전환에 빨리
@@ -348,19 +369,11 @@ def listen_once(should_stop=None, on_level=None, on_wake=None):
     on_level 도 _Engine.listen() 참고 — 실시간 마이크 레벨 표시용.
     on_wake 도 _Engine.listen() 참고 — 웨이크워드 감지 순간 화면 문구를
     바꾸는 용도.
+    require_wake=False 도 _Engine.listen() 참고 — 명령 확인("실행") 단계처럼
+    이미 한 번 웨이크워드를 거친 직후에는 다시 안 기다리고 바로 녹음한다.
     """
-    return _get_engine().listen(should_stop=should_stop, on_level=on_level, on_wake=on_wake)
-
-
-def collect_command(zones, should_stop=None):
-    """listen_once() 로 받은 문장을 해석까지. sign_command.collect_command()와
-    같은 모양 (text, steps, how) 을 돌려준다. 문장을 못 받으면 None.
-    """
-    text = listen_once(should_stop=should_stop)
-    if not text:
-        return None
-    steps, how = command_ready_from_text(text, zones) or ([], "규칙")
-    return text, steps, how
+    return _get_engine().listen(should_stop=should_stop, on_level=on_level,
+                                 on_wake=on_wake, require_wake=require_wake)
 
 
 def watch(zones=(1, 2, 3, 4)):
@@ -468,7 +481,7 @@ def watch_gui(zones=(1, 2, 3, 4)):
             confirmed = False
             while time.time() < deadline and not stop["v"]:
                 reply = listen_once(should_stop=lambda: stop["v"] or time.time() >= deadline,
-                                    on_level=set_level)
+                                    on_level=set_level, require_wake=False)
                 if reply and is_confirm(reply):
                     confirmed = True
                 break
