@@ -32,3 +32,9 @@ rosbag2_*/
 
 # MediaPipe 모델 — 구글에서 내려받는다 (sign_control/README.md 참고)
 *.task
+
+# Claude Code 개인 설정 (커밋하지 않는다)
+.claude/settings.local.json
+
+# 구역 교시 백업 (로컬 전용)
+block_sort/zones.yaml.bak-*
