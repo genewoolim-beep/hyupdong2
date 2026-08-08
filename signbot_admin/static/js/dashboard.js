@@ -9,7 +9,7 @@
   const POLL_INTERVAL_MS = 5000;
   const SENTENCE_POLL_INTERVAL_MS = 300; // 진행중 단어(live_word)까지 보여주려면 훨씬 자주 폴링해야 함
   const MODE_POLL_INTERVAL_MS = 1000;    // 작업모드/제어모드 전환을 빠르게 체감하도록
-  const MODE_LABEL = { work: "작업모드", control: "제어모드" };
+  const MODE_LABEL = { work: "작업모드", control: "제어모드", voice: "음성모드" };
 
   function fmtNumber(n) {
     return Number(n).toLocaleString("ko-KR");
@@ -114,13 +114,22 @@
     }
     const hint = document.getElementById("modeBannerHint");
     if (hint) {
-      hint.textContent =
-        data.mode === "control"
-          ? "사람이 손동작(hand_gesture_control.py)으로 로봇을 직접 조종 중입니다."
-          : '로봇은 수어 명령을 기다리는 중입니다. "박수 - 모드변경 - 박수"로 제어권을 넘길 수 있습니다.';
+      const HINTS = {
+        control: "사람이 손동작(hand_gesture_control.py)으로 로봇을 직접 조종 중입니다.",
+        voice: '음성으로 명령하는 중입니다. 명령 후 "실행"이라고 말해야 움직입니다. "작업모드"라고 말하거나 아래 버튼으로 돌아갈 수 있습니다.',
+      };
+      hint.textContent = HINTS[data.mode]
+        || '로봇은 수어 명령을 기다리는 중입니다. "박수 - 모드변경 - 박수"로 제어권을 넘길 수 있습니다.';
     }
     const updatedAt = document.getElementById("modeUpdatedAt");
     if (updatedAt) updatedAt.textContent = data.updated_at;
+
+    // 음성모드 버튼은 지금 모드에 맞는 쪽만 보인다 — work 면 "음성모드 진입",
+    // voice 면 "작업모드로 복귀". 둘 다 있으면 헷갈리므로 하나만 남긴다.
+    const enterBtn = document.getElementById("btnVoiceModeEnter");
+    const exitBtn = document.getElementById("btnVoiceModeExit");
+    if (enterBtn) enterBtn.style.display = data.mode === "work" ? "" : "none";
+    if (exitBtn) exitBtn.style.display = data.mode === "voice" ? "" : "none";
 
     // 모드가 실제로 전환된 순간에만, 그 모드에 맞는 화면으로 자동 이동한다.
     // (매 폴링마다 같은 값이 와도 리다이렉트하면 안 되므로 이전 값과 비교한다.)
@@ -306,6 +315,29 @@
       });
   }
 
+  // 음성모드 진입·복귀 — 대시보드가 /api/mode 에 직접 쓰는 유일한 자리다.
+  // 나머지 전환(work↔control, work↔voice 음성 트리거)은 block_sort.py 쪽이
+  // 스스로 판단해서 쓴다. 여기서는 사람이 버튼을 눌렀을 때만 쏜다.
+  async function sendMode(mode) {
+    try {
+      await fetch("/api/mode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      renderMode(await (await fetch("/api/mode")).json());
+    } catch (e) {
+      console.error("mode switch failed", e);
+    }
+  }
+
+  function bindModeButtons() {
+    const enterBtn = document.getElementById("btnVoiceModeEnter");
+    const exitBtn = document.getElementById("btnVoiceModeExit");
+    if (enterBtn) enterBtn.addEventListener("click", () => sendMode("voice"));
+    if (exitBtn) exitBtn.addEventListener("click", () => sendMode("work"));
+  }
+
   // 엔드이펙터(TCP) 가 틀리면 화면을 덮는 큰 경고를 띄운다.
   //
   // **판정은 여기서 하지 않는다.** block_sort 가 보내는 tcp.ok 를 그대로 쓴다
@@ -400,6 +432,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", bindControlButtons);
+  document.addEventListener("DOMContentLoaded", bindModeButtons);
 
   window.SignBotDashboard = { startPolling, fetchStatus, fetchLogs };
 })();

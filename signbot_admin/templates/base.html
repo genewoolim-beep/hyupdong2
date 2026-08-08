@@ -14,6 +14,14 @@
         <span class="dot"></span>
         <span id="modeText">{{ mode_label.get(mode.mode, mode.mode) }}</span>
       </div>
+      {# 음성모드 버튼 — 두 화면 어디서나 눌러야 하므로 navbar(base.html)에 둔다.
+         한 번에 하나만 보인다: work면 진입 버튼, voice면 복귀 버튼 (dashboard.js
+         의 renderMode가 style.display로 전환한다). control 모드 중엔 둘 다
+         숨긴다 — 그때는 애초에 음성모드로 못 들어간다(모드가 배타적이므로). #}
+      <button class="btn btn-secondary btn-nav" id="btnVoiceModeEnter"
+              style="display: {{ 'none' if mode.mode != 'work' else '' }}">음성모드 진입</button>
+      <button class="btn btn-secondary btn-nav" id="btnVoiceModeExit"
+              style="display: {{ '' if mode.mode == 'voice' else 'none' }}">작업모드로 복귀</button>
       <div class="status-pill{{ '' if robot.connected else ' offline' }}" id="robotStatusPill">
         <span class="dot"></span>
         <span id="robotStatusText">{{ '로봇 연결됨' if robot.connected else '로봇 연결 끊김' }}</span>

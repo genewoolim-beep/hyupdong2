@@ -2112,6 +2112,138 @@ class BlockSort(Node):
         push_debug("info", "모드", f"작업모드 복귀 — {why}")
         return True
 
+    def _start_voice_listener(self):
+        """work 모드 동안 배경에서 "음성모드" 발화를 기다린다.
+
+        음성모드 진입은 대시보드 버튼과 음성 둘 다 되게 했다 — 제어모드가
+        복귀 수단을 셋(양손 3초/Q/대시보드) 두는 것과 같은 이유다. 한 가지
+        방법만 있으면 그게 막혔을 때 못 빠져나온다. 이 스레드는 로봇을 전혀
+        건드리지 않으므로(모드값만 바꿈) 언제 죽어도, 몇 번을 돌아도 안전하다.
+
+        mode 가 "work" 일 때만 마이크를 연다 — voice·control 로 넘어가면
+        run_voice()/teleop_mode 가 마이크·DSR 을 쓰므로 서로 안 겹친다
+        (/api/mode 값이 배타적이라 동시에 두 상태가 될 수 없다).
+        """
+        if not USE_ADMIN:
+            return    # 대시보드 없인 모드 전환도, 진입 신호를 볼 곳도 없다
+        import threading
+        sys.path.insert(0, HERE)
+        import voice_command as vc
+
+        def _loop():
+            while True:
+                if get_mode() != "work":
+                    time.sleep(1.0)
+                    continue
+                try:
+                    text = vc.listen_once(should_stop=lambda: get_mode() != "work")
+                except Exception as e:
+                    self.get_logger().error(f"음성 진입 감지 오류: {e}")
+                    time.sleep(3.0)
+                    continue
+                if text and vc.is_enter_voice(text):
+                    self.get_logger().warn(f"⇄ 음성으로 '{text}' — 음성모드로 전환")
+                    push_mode("voice")
+
+        threading.Thread(target=_loop, daemon=True).start()
+
+    def run_voice(self):
+        """음성모드 — 말로 명령하고 "실행"이라고 확인해야 움직인다.
+
+        run_teleop() 과 같은 이유로 이 프로세스 안에서 돈다 — 별 프로세스가
+        DSR 에 또 붙으면 안 된다(teleop_mode.py 머리말 참고).
+
+        **확인 단계를 넣은 이유**: 수어는 어휘가 16개뿐이라 오인식 폭이
+        좁은데, 음성은 STT+LLM 이라 훨씬 자유로운 문장을 그럴듯하게 해석해
+        버릴 수 있다(옆에서 나는 대화가 명령처럼 들릴 위험). 해석 결과를
+        로그·대시보드에 띄우고 "실행"이라는 말을 한 번 더 들어야 로봇이
+        움직인다. 시간 안에 확인이 없으면 조용히 버린다.
+        """
+        sys.path.insert(0, HERE)
+        import sign_command as sc
+        import voice_command as vc
+        import threading
+
+        self.get_logger().warn(
+            "⇄ 음성모드. 명령 후 '실행'이라고 말해야 움직입니다. "
+            "돌아오는 방법 둘: 음성으로 '작업모드' / 대시보드에서 작업모드 전환.")
+        push_mode("voice")
+        push_debug("info", "모드", "음성모드")
+        zones = sorted(self.cfg["zones"])
+
+        watch = {"stop": False}
+
+        def _watch():
+            while not watch["stop"]:
+                if get_mode(default="voice") != "voice":
+                    watch["stop"] = True    # 대시보드에서 작업모드로 돌렸다
+                    return
+                time.sleep(1.0)
+
+        threading.Thread(target=_watch, daemon=True).start()
+        should_stop = lambda: watch["stop"]
+
+        why = "정상 종료"
+        try:
+            while not watch["stop"]:
+                text = vc.listen_once(should_stop=should_stop)
+                if not text:
+                    continue    # should_stop 이 걸려서 빈손으로 돌아온 경우 포함
+                if vc.is_exit_voice(text):
+                    why = f"음성 복귀 — '{text}'"
+                    break
+                glosses = vc.normalize(text)
+                r = sc.command_ready(glosses, zones)
+                if not r or not r[0]:
+                    self.get_logger().warn(f"'{text}' 를 해석하지 못했습니다 — 다시 말해주세요.")
+                    continue
+                steps, how = r
+                self.get_logger().warn(
+                    f"[{how}] '{text}' → " +
+                    ", ".join(f"{sc.describe(s)}→{z}번" for s, z in steps) +
+                    f"  — {vc.CONFIRM_TIMEOUT_SEC:.0f}초 안에 '실행'이라고 말하면 진행합니다")
+                push_debug("info", "음성 대기", f"'{text}' → 확인 대기 중")
+
+                deadline = time.time() + vc.CONFIRM_TIMEOUT_SEC
+                confirmed = False
+                while time.time() < deadline and not watch["stop"]:
+                    reply = vc.listen_once(
+                        should_stop=lambda: watch["stop"] or time.time() >= deadline)
+                    if not reply:
+                        break    # 시간 초과나 대시보드 강제 전환
+                    if vc.is_confirm(reply):
+                        confirmed = True
+                    elif vc.is_exit_voice(reply):
+                        why = f"음성 복귀 — '{reply}'"
+                        watch["stop"] = True
+                    break        # 확인이든 취소든 다른 말이든, 한 번만 듣는다
+
+                if watch["stop"]:
+                    break
+                if not confirmed:
+                    self.get_logger().info("명령을 취소했습니다 — 확인이 없었습니다.")
+                    push_debug("info", "음성 취소", f"'{text}' 확인 없이 취소")
+                    continue
+
+                for src, zone in steps:
+                    if src == "copy":
+                        self.copy_human(mirror=bool(zone))
+                        continue
+                    if not self.run_one(src, zone):
+                        self.get_logger().warn(f"{sc.describe(src)} → {zone}번 실패")
+        except Exception as e:
+            # 음성모드가 터져도 작업모드는 살아 있어야 한다 (run_teleop 과 같은 이유).
+            self.get_logger().error(f"음성모드 오류: {e}")
+            push_debug("error", "음성모드", str(e))
+            why = f"오류: {e}"
+        finally:
+            watch["stop"] = True
+            push_mode("work")
+
+        self.get_logger().warn(f"⇄ 작업모드로 복귀했습니다 — {why}")
+        push_debug("info", "모드", f"작업모드 복귀 — {why}")
+        return True
+
     def run_sign(self, once=False):
         """수어 한 문장 → LLM 해석 → 구역 배치. 기본은 반복이다.
 
@@ -2129,6 +2261,7 @@ class BlockSort(Node):
         # 첫 명령 전에 이미 '제어모드' 로 보인다.
         ensure_tcp(self.get_logger())     # 파지 좌표가 전부 이 TCP 기준이다
         push_mode("work")
+        self._start_voice_listener()       # 배경에서 "음성모드" 발화를 기다린다
         self.push_hardware()               # TCP·카메라 상태를 한 번 올린다
         try:
             return self._sign_loop(sc, rec, zones, colors, once)
@@ -2137,6 +2270,15 @@ class BlockSort(Node):
 
     def _sign_loop(self, sc, rec, zones, colors, once):
         while True:
+            if get_mode() == "voice":
+                # 대시보드 버튼으로 바뀐 경우를 여기서 잡는다. 음성 자체로
+                # 바뀐 경우도 결국 push_mode("voice") 를 거치므로 다음 루프
+                # 회전에 똑같이 걸린다 — 진입 경로가 둘이어도 실제로 voice
+                # 모드에 들어가는 통로는 이 체크 하나뿐이다.
+                ok = self.run_voice()
+                if once:
+                    return ok
+                continue
             # 명령을 기다리기 직전에 갱신한다. create_timer 로는 안 된다 —
             # 이 루프는 인식·모션에 블로킹되어 있어 실행기가 안 돌고, 그러면
             # 타이머 콜백이 영영 안 불린다. 여기라면 팔이 멎어 있어 DSR 서비스

@@ -107,12 +107,15 @@ current_sentence = {
 debug_logs = []
 
 # 지금 어느 인터페이스가 활성인지. work(작업모드 — 수어로 로봇에 명령) /
-# control(제어모드 — 사람이 손동작으로 로봇을 직접 조종).
+# control(제어모드 — 사람이 손동작으로 로봇을 직접 조종) /
+# voice(음성모드 — 말로 로봇에 명령, "실행"으로 확인해야 움직임).
 # block_sort.py sign --admin 이 "모드변경" 글로스를 확정하면 control 로,
 # 제어모드에서 나올 때(양손 3초 / Q / 여기서 전환) work 로 보고한다.
-# 여기서 work 로 돌리면 제어모드가 그것을 보고 스스로 빠져나온다 —
+# voice 는 음성으로 "음성모드"/"작업모드" 라고 말하거나 여기서 버튼을 눌러
+# 전환한다 — 진입·복귀 방법이 둘인 이유는 voice_command.py 머리말 참고.
+# 여기서 work 로 돌리면 control/voice 가 그것을 보고 스스로 빠져나온다 —
 # 대시보드가 조종을 끊는 유일한 길이다.
-MODE_LABEL = {"work": "작업모드", "control": "제어모드"}
+MODE_LABEL = {"work": "작업모드", "control": "제어모드", "voice": "음성모드"}
 system_mode = {"mode": "work", "updated_at": "-"}
 
 

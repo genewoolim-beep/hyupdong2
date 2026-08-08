@@ -5,6 +5,7 @@
   --teal: #2199C4;
   --success: #21C478;
   --orange: #ED6B33;
+  --purple: #7B5CD6;
   --danger: #DE3D3D;
   --text-dark: #1C212E;
   --text-muted: #737A87;
@@ -53,6 +54,8 @@ body {
 .mode-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--primary); }
 .mode-pill.mode-control { background: rgba(237, 107, 51, 0.2); color: var(--orange); }
 .mode-pill.mode-control .dot { background: var(--orange); }
+.mode-pill.mode-voice { background: rgba(123, 92, 214, 0.2); color: var(--purple); }
+.mode-pill.mode-voice .dot { background: var(--purple); }
 
 /* ---------- Page tabs ---------- */
 .page-tabs {
@@ -143,9 +146,14 @@ body {
   border-color: var(--orange);
   background: rgba(237, 107, 51, 0.08);
 }
+.mode-banner-voice {
+  border-color: var(--purple);
+  background: rgba(123, 92, 214, 0.08);
+}
 .mode-banner-label { font-size: 13px; color: var(--text-muted); }
 .mode-banner-value { font-size: 32px; font-weight: 800; color: var(--primary); }
 .mode-banner-control .mode-banner-value { color: var(--orange); }
+.mode-banner-voice .mode-banner-value { color: var(--purple); }
 .mode-banner-hint { font-size: 13px; color: var(--text-muted); }
 .mode-banner-updated { font-size: 12px; color: var(--text-light); }
 
@@ -366,3 +374,7 @@ body {
    배너가 화면 위쪽을 다 먹어 카메라가 한 화면에 안 들어왔다. */
 .page-title-mode { font-weight: 800; color: var(--primary); }
 .page-title-mode.mode-control { color: var(--orange); }
+.page-title-mode.mode-voice { color: var(--purple); }
+
+/* navbar의 음성모드 진입·복귀 버튼 — 다른 nav-right 항목과 높이를 맞춘다 */
+.btn-nav { padding: 6px 14px; font-size: 13px; }
