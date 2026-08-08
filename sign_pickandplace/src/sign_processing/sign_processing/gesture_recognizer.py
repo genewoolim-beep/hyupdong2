@@ -342,7 +342,7 @@ class SignRecognizer:
         return frame
 
     def recognize_sentence(self, is_end, on_gloss=None, max_glosses=8, hint="",
-                           delimiter=None):
+                           delimiter=None, should_stop=None):
         """문장 하나가 될 때까지 카메라 루프 한 번으로 계속 인식한다.
 
         recognize_one() 을 반복 호출하는 것과 다른 점 셋이다.
@@ -358,6 +358,12 @@ class SignRecognizer:
           첫 번째 — 여기서부터 모은다. 그 전에 인식된 것은 버린다.
           두 번째 — 문장 끝. is_end 는 묻지 않는다.
         지나가는 손짓이나 준비 동작이 명령에 섞이지 않게 하려는 것이다.
+
+        should_stop 을 주면 매 프레임마다 확인해서, True 가 되는 즉시 None 을
+        돌려주고 빠져나온다(q 취소와 같은 취급). block_sort.py 가 다른 모드로
+        전환됐을 때 수어 문장이 끝나길 기다리지 않고 바로 넘어가려고 쓴다.
+        기본값 None 이면 이 확인을 안 해서, 기존 호출자(sign_demo.py 등)의
+        동작은 그대로다.
         """
         cap = self._camera()
         try:
@@ -371,6 +377,8 @@ class SignRecognizer:
             armed = delimiter is None      # 여는 신호를 기다리는 중인가
 
             while True:
+                if should_stop is not None and should_stop():
+                    return None
                 ok, frame = cap.read()
                 if not ok:
                     # 오래 안 읽다 보면(로봇이 움직이는 동안) 장치가 삐끗할 때가

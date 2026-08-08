@@ -2112,42 +2112,7 @@ class BlockSort(Node):
         push_debug("info", "모드", f"작업모드 복귀 — {why}")
         return True
 
-    def _start_voice_listener(self):
-        """work 모드 동안 배경에서 "음성모드" 발화를 기다린다.
-
-        음성모드 진입은 대시보드 버튼과 음성 둘 다 되게 했다 — 제어모드가
-        복귀 수단을 셋(양손 3초/Q/대시보드) 두는 것과 같은 이유다. 한 가지
-        방법만 있으면 그게 막혔을 때 못 빠져나온다. 이 스레드는 로봇을 전혀
-        건드리지 않으므로(모드값만 바꿈) 언제 죽어도, 몇 번을 돌아도 안전하다.
-
-        mode 가 "work" 일 때만 마이크를 연다 — voice·control 로 넘어가면
-        run_voice()/teleop_mode 가 마이크·DSR 을 쓰므로 서로 안 겹친다
-        (/api/mode 값이 배타적이라 동시에 두 상태가 될 수 없다).
-        """
-        if not USE_ADMIN:
-            return    # 대시보드 없인 모드 전환도, 진입 신호를 볼 곳도 없다
-        import threading
-        sys.path.insert(0, HERE)
-        import voice_command as vc
-
-        def _loop():
-            while True:
-                if get_mode() != "work":
-                    time.sleep(1.0)
-                    continue
-                try:
-                    text = vc.listen_once(should_stop=lambda: get_mode() != "work")
-                except Exception as e:
-                    self.get_logger().error(f"음성 진입 감지 오류: {e}")
-                    time.sleep(3.0)
-                    continue
-                if text and vc.is_enter_voice(text):
-                    self.get_logger().warn(f"⇄ 음성으로 '{text}' — 음성모드로 전환")
-                    push_mode("voice")
-
-        threading.Thread(target=_loop, daemon=True).start()
-
-    def run_voice(self):
+    def run_voice(self, rec):
         """음성모드 — 말로 명령하고 "실행"이라고 확인해야 움직인다.
 
         run_teleop() 과 같은 이유로 이 프로세스 안에서 돈다 — 별 프로세스가
@@ -2158,11 +2123,20 @@ class BlockSort(Node):
         버릴 수 있다(옆에서 나는 대화가 명령처럼 들릴 위험). 해석 결과를
         로그·대시보드에 띄우고 "실행"이라는 말을 한 번 더 들어야 로봇이
         움직인다. 시간 안에 확인이 없으면 조용히 버린다.
+
+        **화면은 sign_processing 창을 그대로 재사용한다** — 새 창을 열지
+        않는다(제어모드가 별 창을 여는 것과 다른 선택. teleop_mode.py 참고).
+        음성 인식(웨이크워드 대기·STT)은 몇 초씩 블로킹되므로, 오디오 처리는
+        배경 스레드로 돌리고 카메라 읽기·그리기는 이 함수(메인 스레드)가
+        맡는다 — 안 그러면 그 몇 초 동안 화면이 멎는다.
         """
+        import cv2
         sys.path.insert(0, HERE)
         import sign_command as sc
         import voice_command as vc
         import threading
+        sys.path.insert(0, sc.SIGN_PROCESSING_DIR)
+        from sign_processing.gesture_recognizer import WIN
 
         self.get_logger().warn(
             "⇄ 음성모드. 명령 후 '실행'이라고 말해야 움직입니다. "
@@ -2172,6 +2146,17 @@ class BlockSort(Node):
         zones = sorted(self.cfg["zones"])
 
         watch = {"stop": False}
+        why = ["정상 종료"]      # 클로저에서 값을 바꿔야 해서 리스트로 감싼다
+        status = {"text": '🎤 "hello rokey" 라고 불러주세요', "sub": "", "level": 0.0}
+        status_lock = threading.Lock()
+
+        def set_status(text, sub=""):
+            with status_lock:
+                status["text"], status["sub"] = text, sub
+
+        def set_level(lvl):
+            with status_lock:
+                status["level"] = lvl
 
         def _watch():
             while not watch["stop"]:
@@ -2183,65 +2168,112 @@ class BlockSort(Node):
         threading.Thread(target=_watch, daemon=True).start()
         should_stop = lambda: watch["stop"]
 
-        why = "정상 종료"
-        try:
-            while not watch["stop"]:
-                text = vc.listen_once(should_stop=should_stop)
-                if not text:
-                    continue    # should_stop 이 걸려서 빈손으로 돌아온 경우 포함
-                if vc.is_exit_voice(text):
-                    why = f"음성 복귀 — '{text}'"
-                    break
-                glosses = vc.normalize(text)
-                r = sc.command_ready(glosses, zones)
-                if not r or not r[0]:
-                    self.get_logger().warn(f"'{text}' 를 해석하지 못했습니다 — 다시 말해주세요.")
-                    continue
-                steps, how = r
-                self.get_logger().warn(
-                    f"[{how}] '{text}' → " +
-                    ", ".join(f"{sc.describe(s)}→{z}번" for s, z in steps) +
-                    f"  — {vc.CONFIRM_TIMEOUT_SEC:.0f}초 안에 '실행'이라고 말하면 진행합니다")
-                push_debug("info", "음성 대기", f"'{text}' → 확인 대기 중")
-
-                deadline = time.time() + vc.CONFIRM_TIMEOUT_SEC
-                confirmed = False
-                while time.time() < deadline and not watch["stop"]:
-                    reply = vc.listen_once(
-                        should_stop=lambda: watch["stop"] or time.time() >= deadline)
-                    if not reply:
-                        break    # 시간 초과나 대시보드 강제 전환
-                    if vc.is_confirm(reply):
-                        confirmed = True
-                    elif vc.is_exit_voice(reply):
-                        why = f"음성 복귀 — '{reply}'"
+        def _audio_loop():
+            try:
+                while not watch["stop"]:
+                    set_status('🎤 "hello rokey" 라고 불러주세요')
+                    text = vc.listen_once(
+                        should_stop=should_stop, on_level=set_level,
+                        on_wake=lambda: set_status("🎙️ 듣고 있어요..."))
+                    if not text:
+                        continue    # should_stop 이 걸려서 빈손으로 돌아온 경우 포함
+                    set_status(f'들음: "{text}"', "해석 중...")
+                    push_debug("info", "음성 인식", f'"{text}"')
+                    if vc.is_exit_voice(text):
+                        why[0] = f"음성 복귀 — '{text}'"
                         watch["stop"] = True
-                    break        # 확인이든 취소든 다른 말이든, 한 번만 듣는다
-
-                if watch["stop"]:
-                    break
-                if not confirmed:
-                    self.get_logger().info("명령을 취소했습니다 — 확인이 없었습니다.")
-                    push_debug("info", "음성 취소", f"'{text}' 확인 없이 취소")
-                    continue
-
-                for src, zone in steps:
-                    if src == "copy":
-                        self.copy_human(mirror=bool(zone))
+                        return
+                    glosses = vc.normalize(text)
+                    r = sc.command_ready(glosses, zones)
+                    if not r or not r[0]:
+                        self.get_logger().warn(f"'{text}' 를 해석하지 못했습니다 — 다시 말해주세요.")
+                        set_status(f'들음: "{text}"', "해석 실패 — 다시 말해주세요")
                         continue
-                    if not self.run_one(src, zone):
-                        self.get_logger().warn(f"{sc.describe(src)} → {zone}번 실패")
-        except Exception as e:
-            # 음성모드가 터져도 작업모드는 살아 있어야 한다 (run_teleop 과 같은 이유).
-            self.get_logger().error(f"음성모드 오류: {e}")
-            push_debug("error", "음성모드", str(e))
-            why = f"오류: {e}"
+                    steps, how = r
+                    desc = ", ".join(f"{sc.describe(s)}→{z}번" for s, z in steps)
+                    self.get_logger().warn(
+                        f"[{how}] '{text}' → {desc}"
+                        f"  — {vc.CONFIRM_TIMEOUT_SEC:.0f}초 안에 '실행'이라고 말하면 진행합니다")
+                    push_debug("info", "음성 해석",
+                               f"{desc} — {vc.CONFIRM_TIMEOUT_SEC:.0f}초 내 확인 대기")
+                    set_status(f"[{how}] {desc}",
+                               f'{vc.CONFIRM_TIMEOUT_SEC:.0f}초 안에 "실행"이라고 말하세요')
+
+                    deadline = time.time() + vc.CONFIRM_TIMEOUT_SEC
+                    confirmed = False
+                    while time.time() < deadline and not watch["stop"]:
+                        reply = vc.listen_once(
+                            should_stop=lambda: watch["stop"] or time.time() >= deadline,
+                            on_level=set_level)
+                        if not reply:
+                            break    # 시간 초과나 대시보드 강제 전환
+                        if vc.is_confirm(reply):
+                            confirmed = True
+                        elif vc.is_exit_voice(reply):
+                            why[0] = f"음성 복귀 — '{reply}'"
+                            watch["stop"] = True
+                        break        # 확인이든 취소든 다른 말이든, 한 번만 듣는다
+
+                    if watch["stop"]:
+                        return
+                    if not confirmed:
+                        self.get_logger().info("명령을 취소했습니다 — 확인이 없었습니다.")
+                        push_debug("info", "음성 취소", f"'{text}' 확인 없이 취소")
+                        set_status(f'들음: "{text}"', "취소됨 — 확인 없음")
+                        continue
+
+                    set_status(f"실행 중: {desc}")
+                    for src, zone in steps:
+                        if src == "copy":
+                            self.copy_human(mirror=bool(zone))
+                            continue
+                        if not self.run_one(src, zone):
+                            self.get_logger().warn(f"{sc.describe(src)} → {zone}번 실패")
+                    set_status(f"완료: {desc}")
+            except Exception as e:
+                # 음성모드가 터져도 작업모드는 살아 있어야 한다 (run_teleop 과 같은 이유).
+                self.get_logger().error(f"음성모드 오류: {e}")
+                push_debug("error", "음성모드", str(e))
+                why[0] = f"오류: {e}"
+                watch["stop"] = True
+
+        threading.Thread(target=_audio_loop, daemon=True).start()
+
+        # 화면 루프 — sign 인식기가 쓰던 그 카메라·창을 그대로 갱신한다.
+        # 손 스켈레톤은 안 그린다 — 음성모드에서는 손을 인식하지 않으므로
+        # 오해를 줄 수 있다. 영상 자체는 그대로 비춰 "화면이 살아있다"는 걸 보여준다.
+        try:
+            cap = rec._camera()
+            while not watch["stop"]:
+                ok, frame = cap.read()
+                if not ok:
+                    continue
+                frame = cv2.flip(frame, 1)
+                h, w = frame.shape[:2]
+                panel = min(150, h // 3)
+                cv2.rectangle(frame, (0, h - panel), (w, h), (25, 25, 25), -1)
+                with status_lock:
+                    text, sub, level = status["text"], status["sub"], status["level"]
+                vc.draw_level_bar(frame, 30, h - panel + 96, 260, 18, level)
+                if rec.painter:
+                    items = [((30, h - panel + 12), [(text, (255, 255, 255))], 30, 0)]
+                    if sub:
+                        items.append(((30, h - panel + 58), [(sub, (120, 255, 255))], 22, 0))
+                    frame = rec.painter.render(frame, items)
+                else:
+                    cv2.putText(frame, text, (30, h - panel + 40),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                if rec.on_frame:
+                    rec.on_frame(frame)
+                cv2.imshow(WIN, frame)
+                if (cv2.waitKey(1) & 0xFF) == ord("q"):
+                    watch["stop"] = True
         finally:
             watch["stop"] = True
             push_mode("work")
 
-        self.get_logger().warn(f"⇄ 작업모드로 복귀했습니다 — {why}")
-        push_debug("info", "모드", f"작업모드 복귀 — {why}")
+        self.get_logger().warn(f"⇄ 작업모드로 복귀했습니다 — {why[0]}")
+        push_debug("info", "모드", f"작업모드 복귀 — {why[0]}")
         return True
 
     def run_sign(self, once=False):
@@ -2261,12 +2293,32 @@ class BlockSort(Node):
         # 첫 명령 전에 이미 '제어모드' 로 보인다.
         ensure_tcp(self.get_logger())     # 파지 좌표가 전부 이 TCP 기준이다
         push_mode("work")
-        self._start_voice_listener()       # 배경에서 "음성모드" 발화를 기다린다
+        self._start_mode_poller()          # collect_command 의 should_stop 이 쓸 캐시
         self.push_hardware()               # TCP·카메라 상태를 한 번 올린다
         try:
             return self._sign_loop(sc, rec, zones, colors, once)
         finally:
             rec.close()            # 카메라와 창은 여기서 딱 한 번 닫는다
+
+    def _start_mode_poller(self):
+        """/api/mode 를 0.3초마다 미리 읽어 self._mode_cache 에 캐싱해 둔다.
+
+        collect_command() 의 should_stop 콜백은 카메라 프레임마다(초당
+        10~30회) 불린다 — 거기서 매번 get_mode() 로 HTTP 왕복을 하면
+        run_teleop() 이 피하려 했던 바로 그 문제(호출부가 네트워크 지연에
+        묶여 프레임이 밀림)가 재현된다. 그래서 폴링은 이 느린 스레드 하나가
+        맡고, 뜨거운 루프(카메라 프레임마다)는 이 딕셔너리만 읽는다.
+        """
+        if not hasattr(self, "_mode_cache"):
+            self._mode_cache = {"value": "work"}
+        import threading
+
+        def _loop():
+            while True:
+                self._mode_cache["value"] = get_mode()
+                time.sleep(0.3)
+
+        threading.Thread(target=_loop, daemon=True).start()
 
     def _sign_loop(self, sc, rec, zones, colors, once):
         while True:
@@ -2275,7 +2327,7 @@ class BlockSort(Node):
                 # 바뀐 경우도 결국 push_mode("voice") 를 거치므로 다음 루프
                 # 회전에 똑같이 걸린다 — 진입 경로가 둘이어도 실제로 voice
                 # 모드에 들어가는 통로는 이 체크 하나뿐이다.
-                ok = self.run_voice()
+                ok = self.run_voice(rec)
                 if once:
                     return ok
                 continue
@@ -2291,9 +2343,16 @@ class BlockSort(Node):
                 rec, zones,
                 on_gloss=lambda l, p, b: self.get_logger().info(
                     f"  · {l} ({p * 100:.0f}%){'  [동사 가중]' if b else ''}"),
-                hint=f"빨강 → {zones[0]}번구역")
-            if got is None:                # 창에서 Q — 사용자가 그만두겠다는 뜻이다
-                self.get_logger().info("취소됨")
+                hint=f"빨강 → {zones[0]}번구역",
+                # 캐시를 읽는다 — get_mode() 를 여기서 직접 부르면 카메라
+                # 프레임마다 HTTP 왕복이 생긴다 (_start_mode_poller 참고).
+                should_stop=lambda: self._mode_cache["value"] != "work")
+            if got is None:
+                if self._mode_cache["value"] != "work":
+                    # 문장이 끝나서가 아니라 모드가 바뀌어서 빠져나온 것이다 —
+                    # 취소가 아니라 다음 루프 회전에서 위쪽 voice 분기로 간다.
+                    continue
+                self.get_logger().info("취소됨")   # 창에서 진짜 Q — 그만두겠다는 뜻
                 return False
             glosses, steps, how = got
             text = " ".join(glosses)

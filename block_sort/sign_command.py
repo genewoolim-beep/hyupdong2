@@ -266,7 +266,7 @@ def command_ready(glosses, zones):
 
 
 def collect_command(recognizer, zones, on_gloss=None, hint="",
-                    max_glosses=MAX_GLOSSES):
+                    max_glosses=MAX_GLOSSES, should_stop=None):
     """박수와 박수 사이를 한 문장으로 모아 해석한다.
     (글로스, steps, 해석방식) 또는 None(취소).
 
@@ -276,11 +276,15 @@ def collect_command(recognizer, zones, on_gloss=None, hint="",
 
     카메라 루프는 recognizer 가 통째로 돌린다 — 글로스마다 카메라를 열고 닫으면
     그 사이에 한 동작이 통째로 사라지고, 화면에 모인 글로스를 못 쌓아 보여준다.
+
+    should_stop 은 그대로 recognizer.recognize_sentence() 에 넘긴다 — 모드가
+    바뀌었을 때 문장이 끝나길 기다리지 않고 바로 빠져나오는 데 쓴다
+    (block_sort.py 의 _sign_loop 참고). None 이면 원래 동작 그대로다.
     """
     gl = recognizer.recognize_sentence(
         lambda g: False,               # 끝은 박수가 정한다
         on_gloss=on_gloss, max_glosses=max_glosses, hint=hint,
-        delimiter=DELIMITER_GLOSS)
+        delimiter=DELIMITER_GLOSS, should_stop=should_stop)
     if gl is None:
         return None
     r = command_ready(gl, zones)

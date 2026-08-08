@@ -5,6 +5,15 @@
   python3 voice_command.py selftest                    정규화·해석 자체 검증 (마이크 불필요)
   python3 voice_command.py parse "빨간색 3번 구역에 놔줘"   정규화+해석만 확인 (마이크 불필요)
   python3 voice_command.py listen                       웨이크워드 → 녹음 → STT 텍스트만 출력
+  python3 voice_command.py watch                        인식만 계속 보기 (로봇 안 움직임, Ctrl+C 종료)
+  python3 voice_command.py watch-gui                     block_sort.py 와 같은 화면(카메라 창)으로 보기 (로봇 안 움직임, Q 종료)
+
+로봇을 움직이는 것은 `block_sort.py`의 `run_voice()`뿐이다. `watch`/`watch-gui`는
+그 앞단(인식·정규화·해석)만 반복해서 보여준다 — sign_demo.py의 `run`이 수어
+인식만 보여주고 로봇을 안 움직이는 것과 같은 역할이다. `watch-gui`는
+`run_voice()`와 똑같은 카메라 창·상태 패널을 쓰므로, 로봇 없이 화면부터
+먼저 확인하고 싶을 때 이걸 쓴다 — `sign_control` 모델(model.pt 등)과
+카메라는 필요하지만 로봇·RealSense는 필요 없다.
 
 로봇을 실제로 움직이는 것은 `block_sort.py`의 `run_voice()`다. 여기를 따로
 떼어 둔 이유는 sign_command.py와 같다 — 정규화 표는 손볼 일이 잦은데
@@ -46,6 +55,7 @@ RECORD_SECONDS = int(os.environ.get("VOICE_RECORD_SEC", 5))
 WAKE_MODEL_PATH = os.environ.get(
     "VOICE_WAKE_MODEL", os.path.join(HERE, "hello_rokey_8332_32.tflite"))
 WAKE_THRESHOLD = float(os.environ.get("VOICE_WAKE_THRESHOLD", 0.3))
+LEVEL_GAIN = float(os.environ.get("VOICE_LEVEL_GAIN", 6.0))   # 레벨 바 표시용 증폭 배수
 
 # ── 모드 전환·확인 문구 ──────────────────────────────────────────────
 # 발음이 조금씩 달라도 잡히도록 여러 표현을 인정한다. sign_command.py의
@@ -202,12 +212,26 @@ class WakeupWord:
         self.stream = None
         self.buffer_size = buffer_size
 
-    def is_wakeup(self):
+    def is_wakeup(self, on_level=None):
+        """on_level 이 있으면 이번 청크의 음량(0~1)을 콜백으로 넘긴다.
+
+        마이크가 실제로 뭘 듣고 있는지 눈으로 확인할 방법이 없다는 피드백을
+        받고 추가했다 — 웨이크워드 대기 중(0.25초 청크마다)이 마이크 입력을
+        가장 자주 샘플링하는 지점이라 여기서 뽑는다.
+        """
         import numpy as np
         from scipy.signal import resample
         audio_chunk = np.frombuffer(
             self.stream.read(self.buffer_size, exception_on_overflow=False),
             dtype=np.int16)
+        if on_level is not None:
+            level = float(np.abs(audio_chunk).mean()) / 32768.0
+            # 화면 표시용 증폭 — 평범하게 말하는 소리는 최댓값(32768) 근처까지
+            # 거의 안 가서 그대로 쓰면 막대가 항상 조금만 채워진다. 실제 녹음엔
+            # 안 쓰고(STT는 원본 audio_chunk 그대로 씀) 눈에 보이는 막대만
+            # sqrt 로 압축해서 조용한 소리도 잘 보이게 한다.
+            level = min(level * LEVEL_GAIN, 1.0) ** 0.5
+            on_level(level)
         audio_chunk = resample(audio_chunk, int(len(audio_chunk) * 16000 / 48000))
         outputs = self.model.predict(audio_chunk, threshold=0.1)
         confidence = outputs[self.model_name]
@@ -274,13 +298,21 @@ class _Engine:
         self.wake = WakeupWord(self.mic_cfg.buffer_size)
         self.stt = STT(openai_api_key=key)
 
-    def listen(self, should_stop=None):
+    def listen(self, should_stop=None, on_level=None, on_wake=None):
         """웨이크워드 대기 → 녹음 → STT. 문장 텍스트를 돌려준다.
 
         should_stop 은 대시보드에서 강제로 모드를 바꿨을 때 이 대기를 빨리
         끝내기 위한 콜백이다 — 안 주면(단독 CLI 실행 등) 그냥 계속 기다린다.
         웨이크워드가 안 들리면 무한정 블로킹되므로, block_sort.py 의
         run_voice() 처럼 대시보드로도 빠져나와야 하는 자리에서는 꼭 넘긴다.
+
+        on_level 은 WakeupWord.is_wakeup() 참고 — 실시간 마이크 입력 레벨을
+        화면에 보여줄 때 쓴다.
+
+        on_wake 는 웨이크워드가 감지된 바로 그 순간(녹음 시작 직전) 한 번
+        불린다 — "hello rokey 라고 불러주세요" 안내문을 그 시점에 "듣는
+        중..."으로 바꿔주는 용도. 이게 없으면 대기 중과 실제 녹음 중을
+        화면만 보고 구분할 수 없었다.
         """
         mic = MicController(self.mic_cfg)
         try:
@@ -290,11 +322,13 @@ class _Engine:
             return None
         self.wake.set_stream(mic.stream)
         print("웨이크워드 대기 중 ('hello rokey')...")
-        while not self.wake.is_wakeup():
+        while not self.wake.is_wakeup(on_level=on_level):
             if should_stop is not None and should_stop():
                 mic.close_stream()
                 return None
         print("웨이크워드 감지!")
+        if on_wake is not None:
+            on_wake()
         mic.close_stream()   # STT가 sounddevice로 다시 열기 전에 장치를 비워준다
         return self.stt.speech2text()
 
@@ -306,13 +340,16 @@ def _get_engine():
     return _engine
 
 
-def listen_once(should_stop=None):
+def listen_once(should_stop=None, on_level=None, on_wake=None):
     """웨이크워드 대기 → 녹음 → STT. 문장 텍스트만 돌려준다 (해석은 안 함).
 
     should_stop 은 _Engine.listen() 참고 — 대시보드 강제 전환에 빨리
     반응해야 하는 자리(block_sort.py 의 진입 스레드·run_voice())에서 넘긴다.
+    on_level 도 _Engine.listen() 참고 — 실시간 마이크 레벨 표시용.
+    on_wake 도 _Engine.listen() 참고 — 웨이크워드 감지 순간 화면 문구를
+    바꾸는 용도.
     """
-    return _get_engine().listen(should_stop=should_stop)
+    return _get_engine().listen(should_stop=should_stop, on_level=on_level, on_wake=on_wake)
 
 
 def collect_command(zones, should_stop=None):
@@ -324,6 +361,154 @@ def collect_command(zones, should_stop=None):
         return None
     steps, how = command_ready_from_text(text, zones) or ([], "규칙")
     return text, steps, how
+
+
+def watch(zones=(1, 2, 3, 4)):
+    """로봇 없이 인식만 계속 보는 모드. sign_demo.py run 의 음성판.
+
+    웨이크워드 → STT → 정규화 → 해석까지 반복해서 찍기만 한다.
+    run_one()/copy_human() 을 절대 안 부른다 — 여기서는 확인("실행")을
+    받아도 실행할 대상이 없다. Ctrl+C 로 종료한다.
+    """
+    print("음성 인식 감시 모드 — 로봇을 움직이지 않습니다. Ctrl+C 로 종료.\n")
+    try:
+        while True:
+            text = listen_once()
+            if not text:
+                continue
+            print(f'\n들은 문장: "{text}"')
+            if is_enter_voice(text):
+                print("  → 음성모드 진입 문구로 인식됨 (실제 전환은 안 함)")
+                continue
+            if is_exit_voice(text):
+                print("  → 작업모드 복귀 문구로 인식됨 (실제 전환은 안 함)")
+                continue
+            if is_confirm(text):
+                print("  → 확인 문구로 인식됨")
+                continue
+            glosses = normalize(text)
+            r = command_ready_from_text(text, zones)
+            print(f"  정규화: {glosses}")
+            if r and r[0]:
+                steps, how = r
+                print(f"  해석[{how}]: " + ", ".join(f"{s}→{z}번" for s, z in steps))
+            else:
+                print("  해석: 실패 — 명령이 되지 않음")
+    except KeyboardInterrupt:
+        print("\n종료합니다.")
+
+
+def draw_level_bar(frame, x, y, w, h, level):
+    """실시간 마이크 입력 레벨을 녹색 막대로 그린다. level 은 0~1.
+
+    block_sort.py 의 run_voice() 와 여기(watch_gui)가 같이 쓴다 — 마이크가
+    실제로 반응하는지 눈으로 볼 방법이 없다는 피드백으로 추가했다.
+    """
+    import cv2
+    cv2.rectangle(frame, (x, y), (x + w, y + h), (90, 90, 90), 1)      # 빈 테두리
+    fill_w = max(0, min(int(w * level), w))
+    if fill_w > 0:
+        cv2.rectangle(frame, (x + 1, y + 1), (x + fill_w - 1, y + h - 1),
+                      (60, 200, 60), -1)                                 # 채워진 만큼 녹색
+
+
+def watch_gui(zones=(1, 2, 3, 4)):
+    """block_sort.py 의 run_voice() 와 같은 화면을 로봇 없이 테스트한다.
+
+    sign_processing 카메라 창을 그대로 띄우고, 왼쪽 아래에 음성 상태를
+    그린다. 로직은 run_voice() 와 똑같이 짜되, self.run_one()/copy_human()
+    호출 자리만 print 로 바꿨다 — **여기서는 로봇이 전혀 필요 없다.**
+    카메라와 sign_control 모델(model.pt, hand/pose task)만 있으면 된다.
+    창에서 Q 를 누르면 종료한다.
+    """
+    import threading
+    import cv2
+
+    sys.path.insert(0, HERE)
+    import sign_command as sc
+    sys.path.insert(0, sc.SIGN_PROCESSING_DIR)
+    from sign_processing.gesture_recognizer import WIN
+
+    print("GUI 테스트 모드 — 로봇을 전혀 부르지 않습니다. 창에서 Q 로 종료.\n")
+    rec = sc.make_recognizer()
+
+    stop = {"v": False}
+    status = {"text": '🎤 "hello rokey" 라고 불러주세요', "sub": "", "level": 0.0}
+    lock = threading.Lock()
+
+    def set_status(text, sub=""):
+        with lock:
+            status["text"], status["sub"] = text, sub
+
+    def set_level(lvl):
+        with lock:
+            status["level"] = lvl
+
+    def _audio_loop():
+        while not stop["v"]:
+            set_status('🎤 "hello rokey" 라고 불러주세요')
+            text = listen_once(should_stop=lambda: stop["v"], on_level=set_level)
+            if not text:
+                continue
+            set_status(f'들음: "{text}"', "해석 중...")
+            if is_exit_voice(text) or is_enter_voice(text):
+                set_status(f'들음: "{text}"', "모드 전환 문구로 인식됨 (여기선 전환 안 함)")
+                continue
+            glosses = normalize(text)
+            r = command_ready_from_text(text, zones)
+            if not r or not r[0]:
+                set_status(f'들음: "{text}"', "해석 실패 — 다시 말해주세요")
+                continue
+            steps, how = r
+            desc = ", ".join(f"{s}→{z}번" for s, z in steps)
+            print(f'[{how}] "{text}" → {desc}  — {CONFIRM_TIMEOUT_SEC:.0f}초 안에 "실행"이라고 말하세요')
+            set_status(f"[{how}] {desc}", f'{CONFIRM_TIMEOUT_SEC:.0f}초 안에 "실행"이라고 말하세요')
+
+            deadline = time.time() + CONFIRM_TIMEOUT_SEC
+            confirmed = False
+            while time.time() < deadline and not stop["v"]:
+                reply = listen_once(should_stop=lambda: stop["v"] or time.time() >= deadline,
+                                    on_level=set_level)
+                if reply and is_confirm(reply):
+                    confirmed = True
+                break
+            if confirmed:
+                print(f"(로봇 없음) 실행했을 것: {desc}")
+                set_status(f"실행(가상): {desc}")
+            else:
+                print("취소됨 — 확인 없음")
+                set_status(f'들음: "{text}"', "취소됨 — 확인 없음")
+
+    threading.Thread(target=_audio_loop, daemon=True).start()
+
+    cap = rec._camera()
+    try:
+        while not stop["v"]:
+            ok, frame = cap.read()
+            if not ok:
+                continue
+            frame = cv2.flip(frame, 1)
+            h, w = frame.shape[:2]
+            panel = min(150, h // 3)
+            cv2.rectangle(frame, (0, h - panel), (w, h), (25, 25, 25), -1)
+            with lock:
+                text, sub, level = status["text"], status["sub"], status["level"]
+            draw_level_bar(frame, 30, h - panel + 96, 260, 18, level)
+            if rec.painter:
+                items = [((30, h - panel + 12), [(text, (255, 255, 255))], 30, 0)]
+                if sub:
+                    items.append(((30, h - panel + 58), [(sub, (120, 255, 255))], 22, 0))
+                frame = rec.painter.render(frame, items)
+            else:
+                cv2.putText(frame, text, (30, h - panel + 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.imshow(WIN, frame)
+            if (cv2.waitKey(1) & 0xFF) == ord("q"):
+                stop["v"] = True
+    finally:
+        stop["v"] = True
+        rec.close()
+        print("종료합니다.")
 
 
 # ── 자체 검증 ───────────────────────────────────────────────────────
@@ -401,6 +586,10 @@ def main():
         print(f"\n들은 문장: {text}")
         if text:
             print(f"정규화: {normalize(text)}")
+    elif m == "watch":
+        watch()
+    elif m == "watch-gui":
+        watch_gui()
     else:
         sys.exit(__doc__)
 
