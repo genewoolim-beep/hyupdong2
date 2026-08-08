@@ -45,8 +45,11 @@ from od_msg.srv import SrvDepthPosition
 # 순간 DSR 에 붙어서 로봇 없이는 시험할 수 없기 때문이다 — 책상에서 확인할 수
 # 있는 계산은 block_geom 에 모아 test_copy_angle.py 가 그대로 시험한다.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from block_geom import (BLOCK_MM, best_axis, blocking_neighbor, fold90,
-                        relocate_step, reorder_for_conflicts, rotate_tool,
+from block_geom import (BLOCK_MM, LANE_HALF, RELOCATE_CLEAR_MIN,
+                        RELOCATE_WIDE_R, SLIDE_MM, axis_blockers, best_axis,
+                        fold90, fold_turn, lane_offsets, pick_order,
+                        slide_dests,
+                        relocate_candidates, reorder_for_conflicts, rotate_tool,
                         tool_yaw)   # noqa: E402
 
 ROBOT_ID, ROBOT_MODEL = "dsr01", "m0609"
@@ -97,6 +100,82 @@ CALIB_OUTLIER = 30.0           # calib 에서 이보다 큰 오차는 오검출�
 # 고정값 하나만 쓰면 45°/135° 에서 6.5mm, 0° 에서 12mm 어긋난다.
 OFFSET_BASE = [10.70, 19.70]
 OFFSET_TOOL = [-6.00, 6.00]
+
+# ── 6번 축이 특정 각도일 때만 더하는 파지 보정 ──────────────────────
+# OFFSET_BASE/OFFSET_TOOL 로도 안 잡히는, **마지막 관절 각도에 딸린** 치우침을
+# 메우는 자리다. 손목이 그 각도로 서면 그리퍼가 블록 중심에서 한쪽으로 밀려
+# 물리는 현상이 있어, 그때만 밀어 준다.
+#
+# **방향은 공구(그리퍼) 기준이다.** 손목이 돌면 보정도 같이 돈다 — 그리퍼가
+# 틀어진 만큼 밀어야 할 방향도 같이 틀어지기 때문이다. base 고정으로 두면
+# 손목 각도가 달라질 때마다 엉뚱한 쪽으로 밀린다.
+# J6_TWEAK_FRAME="base" 로 두면 예전처럼 base 고정 방향이 된다.
+#
+# J6_TWEAK_AT     이 6번 축 각도(도)에서 적용
+# J6_TWEAK_W      ±이 안이면 적용, 벗어나면 0 (계단식 — 중간값을 주지 않는다)
+# J6_TWEAK_XY     그때 더할 양 (mm). FRAME 이 tool 이면 **공구 x,y** 기준.
+# J6_TWEAK_FRAME  "tool"(기본) 또는 "base"
+#
+# 실측 2026-08-08: 손목각과 6번 축 사이에 팔 자세에 따라 -1~+11° 오프셋이 있다.
+#   손목  -1° -> 6번 축 +10.2°     손목  +4° -> 6번 축 +14.8°    <- 둘 다 "세로"
+#   손목 +80° -> 6번 축 +85.8°     손목 +90° -> 6번 축 +100.7°   <- "가로"
+# 세로 무리와 가로 무리 사이가 70° 넘게 벌어져 있어 +-40 으로 키워도 가로를
+# 잘못 잡지 않는다.
+#
+# **툴 기준 오른쪽은 +y 다 (2026-08-08 실측).** 처음에 축 이름만 보고
+# tool(-15,0) 을 넣었다가 옆 블록을 쳤다 — 그 자세(공구방위 +170°)에서
+# tool -x 는 오른쪽이 아니라 **앞**이었다:
+#   tool +x -> base (-14.8,  +2.6)  뒤
+#   tool -x -> base (+14.8,  -2.6)  앞      <- 잘못 넣었던 것
+#   tool +y -> base ( -2.6, -14.8)  오른쪽   <- 이것이 맞다
+#   tool -y -> base ( +2.6, +14.8)  왼쪽
+# 그때 배치에서 보라색까지 TCP 거리:
+#   보정 없이 24.6mm(충돌) / tool(-15,0) 27.3mm(충돌) / tool(0,+15) 39.6mm(안전)
+#
+# 0,0 으로 두면 이 기능이 꺼진다.
+J6_TWEAK_AT = float(os.environ.get("J6_TWEAK_AT", 0.0))
+J6_TWEAK_W = float(os.environ.get("J6_TWEAK_W", 40.0))
+J6_TWEAK_XY = [float(v) for v in
+               os.environ.get("J6_TWEAK_XY", "0,15").replace(" ", "").split(",")]
+J6_TWEAK_FRAME = os.environ.get("J6_TWEAK_FRAME", "tool")
+
+
+def j6_tweak(pose):
+    """그 자세로 파지할 때 6번 축이 기준 각도 +-여유 안이면 더할 보정.
+
+    돌려주는 것: (base 기준 보정 np.array, 6번 축 각도 또는 None)
+
+    **움직이기 전에 판단한다.** ikin 으로 목표 자세의 관절값을 미리 풀어 6번
+    축을 본다. 보정을 처음부터 좌표에 얹은 채로 한 번에 내려가므로 추가 이동이
+    없고, 접근/하강 경로도 그대로다.
+
+    **공구 기준 보정을 base 로 돌려서 돌려준다.** 좌표는 base 로 더해야 하므로
+    여기서 한 번에 변환한다. 회전량은 그 자세의 공구 방위(tool_yaw)다 —
+    OFFSET_TOOL 이 손목과 함께 도는 것과 같은 기준이다.
+
+    각도 차이는 +-180 으로 접어서 잰다 — 0도와 360도는 같은 자세다.
+    180도는 그리퍼 물림 방향은 같지만 **적용하지 않는다.**
+
+    ikin 이 실패하면 보정 없이 간다 — 이것 때문에 파지가 죽으면 안 된다.
+    """
+    if not any(J6_TWEAK_XY):
+        return np.zeros(2), None
+    try:
+        sol = get_current_posx()[1]
+        j6 = float(ikin(list(pose), sol)[5])
+    except Exception as e:
+        print(f"6번 축을 미리 못 풀어 보정을 건너뜁니다({e})")
+        return np.zeros(2), None
+    d = (j6 - J6_TWEAK_AT + 180.0) % 360.0 - 180.0
+    if abs(d) > J6_TWEAK_W:
+        return np.zeros(2), j6
+    v = np.array(J6_TWEAK_XY, dtype=float)
+    if J6_TWEAK_FRAME == "tool":
+        r = np.radians(tool_yaw(pose[3:]))
+        R = np.array([[np.cos(r), -np.sin(r)], [np.sin(r), np.cos(r)]])
+        v = R @ v
+    return v, j6
+
 
 # 기본 파지 방향. 관측 자세 그대로면 손가락이 base x 로 닫힌다.
 # 90 을 주면 base y 로 닫힌다.
@@ -150,17 +229,61 @@ CONTROL_MAX_SEC = float(os.environ.get("CONTROL_MAX_SEC", 600.0))
 # 재시도마다 이 값의 배수로 늘린다 — 거부는 큐가 비면 풀리므로 조금 기다리는
 # 것이 곧바로 다시 넣는 것보다 빨리 성공한다.
 MOVE_RETRY_WAIT = float(os.environ.get("MOVE_RETRY_WAIT", 0.5))
+# movel 이 '도착했는지' 를 **위치로** 확인할 때 쓰는 값.
+# 상태(STANDBY)만 보면 명령 직후에는 모션이 시작 전이라 그냥 통과해서,
+# 멀쩡히 가고 있는 이동을 실패로 판정한다(실측 2026-08-08 의 상승 실패).
+MOVE_SETTLE_T = float(os.environ.get("MOVE_SETTLE_T", 6.0))   # 최대 관찰 시간(초)
+MOVE_SETTLE_N = int(os.environ.get("MOVE_SETTLE_N", 6))       # 이만큼 연속 안 변하면 멎음
 
 # 블록을 물고 xy 로 옮길 때 올라가는 절대 높이(mm). lift_height(150) 로는
 # TCP 가 판에서 137mm 인데, 손가락이 그보다 한참 아래로 내려와 옆 블록을 스친다.
 # 실측 2026-08-04: 옮기는 도중 다른 블록을 건드리는 일이 있었다.
 TRANSIT_Z = float(os.environ.get("TRANSIT_Z", 250.0))
+# 이송 높이(TRANSIT_Z)까지 못 올라갈 때 대신 올릴 높이(mm).
+# 판 바깥쪽(x가 큰 곳) 블록은 팔을 뻗은 채 250mm 까지 올리려면 작업영역을
+# 벗어나 IK 해가 없다 — 컨트롤러가 조용히 거부한다(실측 2026-08-08:
+# [641.4, -11.0, 250.0] 상승이 두 곳에서 각각 3회씩 다 무시됐다).
+# 그때 통째로 포기하면 물린 채 판을 대각선으로 지나가 다른 블록을 친다.
+# 조금이라도 올리는 편이 낫다.
+LIFT_FALLBACK = float(os.environ.get("LIFT_FALLBACK", 50.0))
 
 # 빈 손으로 블록 위에 접근할 때의 최소 높이(mm). 검출을 마친 자리가 이보다
 # 높으면 그 높이를 그대로 쓰고, 낮으면 여기까지만 올린다.
 # 블록 윗면이 판 위 35mm 이므로 120mm 면 손가락 밑으로 여유가 충분하다.
 # 이송(TRANSIT_Z=250)과 달리 물린 블록이 없어 여유가 덜 필요하다.
 APPROACH_Z = float(os.environ.get("APPROACH_Z", 120.0))
+
+# 이 거리 안에 잡힌 것은 **자기 자신**으로 본다(mm).
+# 35mm 블록 둘은 중심이 35mm 보다 가까울 수 없다 — 그보다 가깝게 잡혔다면 같은
+# 블록을 다시 본 것이다(검출 흔들림). 이 값을 10mm 로 두었더니 흔들림이 그것을
+# 넘는 순간 자기 자신을 옆 블록으로 세어 **틈이 음수**가 되고, 두 축 다 막힌 것으로
+# 보여 멀쩡한 블록을 거부했다(실측 2026-08-07: 초록을 못 집었다).
+SELF_R = float(os.environ.get("SELF_R", 30.0))
+
+
+def reach_box():
+    """팔을 보내도 되는 xy 범위 (x0, x1, y0, y1). 모르면 None.
+
+    이웃을 치울 자리가 **판 밖이면 안 된다.** 그런데 block_sort 에는 판 경계가
+    없었다 — 구역 좌표만 있고, 그 바깥이 어디까지인지는 적힌 데가 없다.
+    유일하게 **실측된** 경계는 조종 쪽 교시 상자다(teach_box.py 로 두 모서리를
+    찍어 teleop_box.env 에 저장, robot_teleop 이 같은 목적으로 쓴다).
+    같은 로봇·같은 판이므로 그것을 빌린다 — 새로 교시하면 양쪽이 함께 따라온다.
+
+    없으면 None 을 돌려주고, 부르는 쪽은 **구역 좌표에서 만든 상자**로 물러난다.
+    """
+    try:
+        gd = os.path.join(os.path.dirname(HERE), "hand_gesture_control")
+        if gd not in sys.path:
+            sys.path.insert(0, gd)
+        import robot_teleop as rt
+        # **교시 원본**(X_MIN…)을 쓴다. TX_MIN 은 거기서 15mm 물린 값인데, 그
+        # 여유는 '속도 지령이 미끄러지는 것' 을 위한 조종 쪽 몫이다. 여기서 쓰면
+        # 판 위 구역까지 밖으로 판정된다 — 실측: 인간구역 y −229 가 TY_MIN(−216)
+        # 밖이다. 원본(−231)은 구역 전부를 덮는다.
+        return rt.X_MIN, rt.X_MAX, rt.Y_MIN, rt.Y_MAX
+    except Exception:
+        return None
 
 # 옆 블록을 피하려고 손목을 돌릴지 볼 때, 이 반경 안의 블록만 본다(mm).
 # 더 멀면 손가락 근처에 오지 않는다 — 개구 절반(약 55) + 블록 한 변이면 넉넉하다.
@@ -180,14 +303,106 @@ PICK_WHEN_TIGHT = os.environ.get("PICK_WHEN_TIGHT", "0") != "0"
 AVOID_NEIGHBORS = os.environ.get("AVOID_NEIGHBORS", "1") != "0"
 
 # 두 축 다 좁아 손목을 돌려도 못 풀 때, 막고 있는 이웃 블록 하나를 옆으로
-# 옮겨 자리를 만들지 여부. **기본은 꺼져 있다** — 옆 블록 회피(손목 회전)와
-# 달리 이건 원래 시키지 않은 블록을 새로 집어서 옮기는 동작이라 실기 검증
-# 전에는 꺼 두는 편이 안전하다. 1 로 켠다.
-RELOCATE_BLOCKERS = os.environ.get("RELOCATE_BLOCKERS", "0") != "0"
+# 옮겨 자리를 만들지 여부.
+#
+# **기본을 켬으로 바꿨다(2026-08-08).** 원래는 '원래 시키지 않은 블록을 새로
+# 집는 동작' 이라 실기 검증 전까지 꺼 두었고, run_all.sh 만 켜서 검증했다.
+# 그 검증이 끝났다 — 오늘 실기에서 여러 번 성공했다(빨간색을 46mm·170mm
+# 밖으로 치우고 그 자리를 열었다). 기본이 꺼져 있으면 **단독 실행**
+# (python3 block_sort.py 빨강 1) 에서만 조용히 동작이 달라져서, 같은 판인데
+# 띄운 방법에 따라 로봇이 다르게 군다 — 그게 더 헷갈린다.
+# 0 으로 두면 예전처럼 사람에게 치워 달라고만 한다.
+RELOCATE_BLOCKERS = os.environ.get("RELOCATE_BLOCKERS", "1") != "0"
 # 원래 목표 하나를 위해 이웃을 몇 개까지 옮겨볼지. 옮겨도 다른 이웃이 같은
 # 축을 또 막고 있을 수 있어 한 번으로 안 끝날 수 있다 — 그렇다고 무한정
 # 옮기면 판 전체를 재배치하게 되므로 상한을 둔다.
-RELOCATE_MAX_TRIES = int(os.environ.get("RELOCATE_MAX_TRIES", 2))
+# 2 → 4 로 올렸다(2026-08-08). 손가락은 양쪽에서 내려오므로 한 축을 열려면
+# 양쪽을 다 치워야 하고(2회), 거기에 검출 오차로 한 번 헛걸음하면 2회로는
+# 모자란다 — 실측에서 십자 포위가 2회 상한에 걸려 포기했다.
+RELOCATE_MAX_TRIES = int(os.environ.get("RELOCATE_MAX_TRIES", 4))
+# 치우려는 이웃 **자신도** 갇혀 있을 때, 그 이웃의 방해물까지 몇 단계나
+# 파고들지. 0 이면 예전처럼 '서로 붙은 뭉치' 를 곧장 사람에게 넘긴다.
+# 1 이면 한 단계 — 갇힌 이웃을 집기 위해 그 이웃의 방해물을 먼저 치운다.
+# **더 올리지 말 것.** 단계마다 로봇이 새로 집어 옮기는 블록이 늘어나고,
+# 그만큼 판이 흐트러지고 시간이 든다. 2×2 뭉치 정도는 1 로 풀린다.
+RELOCATE_CHAIN = int(os.environ.get("RELOCATE_CHAIN", 1))
+# 이 x 를 넘는 블록은 **뒤로 미룬다**(거르지는 않는다). 판 바깥쪽은 주변이
+# 비어 있어 "집기 쉬운 것" 으로 뽑히기 쉬운데 정작 팔이 못 닿는다.
+#
+# **진짜 한계는 블록이 아니라 카메라다.** 블록을 수직으로 내려다보려면 팔이
+# 핸드아이 오프셋(+32.6, +60.1)만큼 **더 바깥으로** 나가야 한다:
+#   블록 x=589 -> 관측 x=621   성공
+#   블록 x=635 -> 관측 x=667   실패
+#   블록 x=640 -> 관측 x=672   실패
+# 실측 실패 목표: 648, 650, 667, 668 (z 를 170/120 으로 낮춰도 실패)
+#
+# **넉넉하게 700 으로 둔다 (2026-08-08 결정).** 실패가 확인된 것은 635 부터
+# 지만, 그 판단을 미리 잘라 버리면 될 수도 있는 자리까지 포기하게 된다.
+# 여기서 미리 막는 대신 **실제로 해보고 안 되면 넘어가는** 쪽을 택했다 —
+# 그 안전망은 이미 다 있다:
+#   · 실패한 blocker 는 이번 파지에서 다시 고르지 않는다(_failed_blockers)
+#   · 후보가 여럿이면 다음 것으로 넘어가고, 그다음 직각 축으로 전환한다
+#   · 상승이 안 되면 LIFT_FALLBACK 만큼만 올려서라도 옮긴다
+# 그래도 판 바깥쪽은 **뒤로 미룬다** — 안쪽을 먼저 처리해 판이 헐거워진 뒤에
+# 시도하면 성공률이 오른다. 거르는 것이 아니라 순서를 뒤로 돌리는 것뿐이다.
+#
+# 값을 낮추면 그만큼 일찍 포기한다(REACH_X_MAX=600 등).
+# 순회 경유점을 바깥에 더 교시하면(teach_zones.py scan) 실제 도달 범위가
+# 늘어나 이 값이 추정이 아니라 실측이 된다.
+REACH_X_MAX = float(os.environ.get("REACH_X_MAX", 700.0))
+# 막는 블록을 **잡은 채로 끌지** 여부. 들었다 놓는 것보다 상승·이송·하강·상승
+# 네 번이 빠지고 블록이 공중에 안 뜬다.
+#
+# **기본을 껐다 (2026-08-08).** 실기에서 충돌했다 — 노란색을 (609,131) 로
+# 끌었는데 거기서 5.7mm 떨어진 곳에 빨간 블록이 있었다(순회 때 (605,135) 로
+# 봤던 것이다). 끌기 직전 복도 검사에는 그 빨강이 안 잡혔다. 목표에서 102mm
+# 라 '옆 블록 살핌(95mm)' 범위 밖이었고, 그 프레임에서 검출도 안 됐다.
+#
+# **끌기는 검출이 한 번만 놓쳐도 물리적 충돌이 된다.** 판 바닥 높이로 밀기
+# 때문에 경로의 물체를 그냥 들이받는다. 들어서 옮기면 TRANSIT_Z 까지 올라갔다
+# 수직으로 내려오므로, 못 본 블록이 있어도 최악이 '겹쳐 놓기' 다 — 이 차이가
+# 속도 이득보다 크다고 판단했다.
+#
+# 다시 켜려면 SLIDE_BLOCKERS=1. 켜기 전에 복도 검사를 믿을 수 있게 만들어야
+# 한다 — 지금 보이는 것만이 아니라 순회에서 모아 둔 좌표까지 함께 봐야 하고,
+# 여유(SLIDE_CLEAR_EXTRA)도 검출 잡음만큼 넉넉해야 한다.
+SLIDE_BLOCKERS = os.environ.get("SLIDE_BLOCKERS", "1") != "0"
+# 끌고 가는 복도에 요구할 **추가** 여유(mm). 블록 한 변 위에 더 얹는다.
+# 5 로 시작했는데 그걸로는 위 충돌을 못 막았다 — 검출이 흔들리는 만큼 키운다.
+SLIDE_CLEAR_EXTRA = float(os.environ.get("SLIDE_CLEAR_EXTRA", 5.0))
+# 끌고 갈 **길**에 뭐가 있는지 볼지 여부. 기본은 안 본다(2026-08-08 결정) —
+# 잡는 데 성공했으면 그냥 끈다. 길 검사가 멀쩡한 방향까지 막아 "끌 길이
+# 막혀 있습니다" 로 죽는 일이 잦았다.
+#
+# **대가:** 끌기는 판 바닥 높이로 미는 동작이라, 길에 있는 블록을 그대로
+# 밀고 간다. 실측 2026-08-08 에 그렇게 빨간 블록을 들이받은 적이 있다.
+# 길까지 보게 하려면 SLIDE_CHECK_PATH=1.
+#
+# 길을 안 봐도 **목적지가 목표를 더는 막지 않는지**와 **팔이 닿는지**는
+# 여전히 확인한다 — 그건 끌기의 목적 자체와 도달 가능성이라 뺄 수 없다.
+SLIDE_CHECK_PATH = os.environ.get("SLIDE_CHECK_PATH", "0") != "0"
+# 끌기가 안 될 때 **들어서 임시 자리로** 옮길지 여부. 기본은 끔(2026-08-08 결정).
+# 끌기는 잡은 채로 직각 60mm 만 가면 되는데, 들어서 옮기기는 판 위 아무 데나
+# (최대 230mm) 던지므로 배치가 크게 흐트러지고 왕복도 길다.
+#
+# **끄면 대가가 있다.** 끌 길이 양쪽 다 막힌 경우에 물러설 곳이 없어져,
+# 다음 후보나 직각 축으로 넘어가고 그것도 안 되면 사람에게 넘긴다.
+# 켜려면 LIFT_RELOCATE=1.
+#
+# '필요한 색을 제 구역으로 곧장 보내는 것'(relocate_to_zone)은 여기 해당하지
+# 않는다 — 그건 임시 대피가 아니라 계획 항목을 한 번에 끝내는 것이라 항상 켜져
+# 있다. 그때만 들어서 옮긴다.
+LIFT_RELOCATE = os.environ.get("LIFT_RELOCATE", "0") != "0"
+# 프리구역에 치울 자리가 없을 때 **구역 안에라도** 치울지 여부.
+# 원래는 구역이면 무조건 거부했다 — 그런데 꽉 찬 판에서는 그 탓에 치우기가
+# 통째로 무산된다(포기하면 원래 블록도 못 집는다). 임시로 치워 두는 자리이니
+# 일단 던져 놓고 보는 편이 낫다는 판단이다.
+# **대가가 있다.** 인간구역에 떨어지면 사람이 만들어 둔 본보기가 물리적으로
+# 망가지고(copy_human 은 이미 읽어 뒀으니 그 판은 끝나지만 다음 판은 다시
+# 만들어야 한다), 로봇구역에 떨어지면 그 칸이 '다른 색이 놓여 있음' 으로 잡혀
+# 건너뛰어진다. 그래서 프리구역을 **먼저** 다 보고, 없을 때만 여기로 온다.
+# 0 으로 두면 예전처럼 구역이면 포기한다.
+RELOCATE_ANYWHERE = os.environ.get("RELOCATE_ANYWHERE", "1") != "0"
 
 # 복제(copy_human) 계획에서, 뒤 순번 색이 앞 순번 색을 막고 있으면 순서를
 # 앞당길지 여부. 새 로봇 동작을 추가하는 게 아니라 **이미 하기로 한 이동들의
@@ -256,7 +471,8 @@ try:
     # DSR 연결을 하나로 두기 위해서다 — 조종 모듈이 자기 노드를 만들면 한
     # 로봇에 두 연결이 되어 TCP 가 풀리고 모션이 거부된다(teleop_mode 참고).
     from DSR_ROBOT2 import (movej as _movej_raw, movel as _movel_raw, speedl,
-                            get_current_posx, mwait, get_robot_state, STATE_STANDBY,
+                            get_current_posx, ikin, mwait,
+                            get_robot_state, STATE_STANDBY,
                             get_current_tool_flange_posx, get_tcp, set_tcp)
 except ImportError as e:
     sys.exit(f"DSR_ROBOT2 임포트 실패: {e}\n로봇 드라이버가 떠 있는지 확인하세요.")
@@ -564,8 +780,24 @@ def wait_idle(timeout=20.0):
         except Exception:
             pass
         time.sleep(0.05)
-    print(f"경고: {timeout}초 동안 STANDBY 가 안 됐습니다 — 그대로 진행합니다")
+    _mlog("warn", f"{timeout}초 동안 STANDBY 가 안 됐습니다 — 그대로 진행합니다")
     return False
+
+
+def _mlog(level, msg):
+    """movel/wait_idle 의 진단을 **ROS 로그에** 남긴다.
+
+    예전에는 print() 였다. 그러면 run_all.sh 를 띄운 터미널에만 뜨고
+    ~/.ros/log 에는 안 남아, 나중에 로그만 보고는 "이동이 실패했는지" 를
+    알 수가 없다. 실측 2026-08-08: 파지 후 상승(263mm)이 0.39초 만에
+    끝난 것처럼 보였는데(VEL_L 300mm/s 로는 1.1초가 걸려야 한다) 실패
+    여부를 확인할 방법이 없었다.
+    """
+    try:
+        import rclpy.logging
+        getattr(rclpy.logging.get_logger("block_sort"), level)(msg)
+    except Exception:
+        print(msg)
 
 
 def _reached(cur, p, tol):
@@ -604,18 +836,44 @@ def movel(p, vel=VEL_L, acc=ACC_L, tol=None, tries=3, timeout=20.0):
         # 앞 모션이 아직 돌고 있으면 이 명령은 버려진다. 미리 막아 둔다.
         wait_idle()
         if _movel_raw(p, vel=vel, acc=acc) != 0:
-            print(f"이동 명령이 거부됐습니다 (컨트롤러가 바쁨). 재시도 {k}/{tries}")
+            _mlog("warn", f"이동 명령이 거부됐습니다 (컨트롤러가 바쁨). 재시도 {k}/{tries}")
             time.sleep(MOVE_RETRY_WAIT)
             continue
         mwait()                              # 모션이 실제로 끝날 때까지
         wait_idle()
+        # **상태 보고에 기대지 않고 위치가 멎을 때까지 본다.**
+        # mwait()/wait_idle() 은 명령 직후에 부르면 아직 STANDBY 라 그냥
+        # 통과한다 — 모션이 시작도 안 했는데 "끝났다" 고 보는 것이다. 그러면
+        # 위치를 읽어도 당연히 제자리라 멀쩡한 이동이 실패로 판정된다
+        # (실측 2026-08-08: 263mm 상승이 0.13초씩 3번 다 "안 갔음" 이었다).
+        # 목표에 닿거나, 위치가 MOVE_SETTLE_N 번 연속 안 변하면 멈춘 것으로 본다.
+        t0 = time.time()
+        last, still = None, 0
+        while time.time() - t0 < MOVE_SETTLE_T:
+            cur = get_current_posx()[0]
+            if _reached(cur, p, tol):
+                return True
+            moved = (float(np.hypot(cur[0] - last[0], cur[1] - last[1]))
+                     + abs(cur[2] - last[2])) if last is not None else 999.0
+            if moved < 0.5:
+                still += 1
+                if still >= MOVE_SETTLE_N:
+                    break                    # 목표는 아닌데 멎었다 — 안 간 것이다
+            else:
+                still = 0
+            last = cur
+            time.sleep(0.05)
         cur = get_current_posx()[0]
         if _reached(cur, p, tol):
             return True
         err = float(np.hypot(cur[0] - p[0], cur[1] - p[1]))
-        print(f"이동이 끝났는데 목표에서 xy {err:.0f}mm, "
-              f"z {abs(cur[2] - p[2]):.0f}mm 벗어나 있습니다. 재시도 {k}/{tries}")
-    print(f"경고: {tries}회 시도했으나 목표에 못 갔습니다 {[round(v, 1) for v in p[:3]]}")
+        _mlog("warn", f"이동이 끝났는데 목표에서 xy {err:.0f}mm, "
+                      f"z {abs(cur[2] - p[2]):.0f}mm 벗어나 있습니다. 재시도 {k}/{tries}")
+        # **여기에도 쉬어야 한다.** 예전에는 이 경로에 대기가 없어 0.13초 간격으로
+        # 세 번을 몰아쳤고, 컨트롤러가 바쁜 그 짧은 순간을 그대로 세 번 다 맞았다
+        # (실측 2026-08-08: 3회 재시도가 통틀어 0.39초 만에 끝났다).
+        time.sleep(MOVE_RETRY_WAIT)
+    _mlog("error", f"{tries}회 시도했으나 목표에 못 갔습니다 {[round(v, 1) for v in p[:3]]}")
     return False
 
 
@@ -986,6 +1244,7 @@ class BlockSort(Node):
         블록은 프리구역에서만 집는다. 이미 구역에 놓인 것을 집으면 본보기나
         방금 만든 배치가 무너진다.
         """
+        self.ready_gripper("복제")
         # 한 바퀴 다 돈다 — 인간구역 4칸을 다 읽어야 계획을 세울 수 있다.
         seen, stock, occ, _, angles = self.patrol()
         # 전체 순회라 인간구역/로봇구역 둘 다 지금 상태 그대로다 — 대시보드에 반영.
@@ -1068,27 +1327,59 @@ class BlockSort(Node):
                 push_debug("info", "복제", "막는 색을 먼저 처리하도록 순서 변경")
                 plan = reordered
 
+        # 남은 계획을 relocate_blocker 가 볼 수 있게 걸어 둔다. 막는 블록이
+        # **어차피 이 계획에서 옮겨야 할 색**이면 임시 자리로 치우는 대신 곧장
+        # 제 구역으로 보내기 위해서다(relocate_to_zone). 실측 2026-08-08:
+        # 보라를 (500,230) 임시 자리로 치우려다 실패했는데, 그 보라는 로봇2번에
+        # 갈 색이었다 — 바로 놓았으면 초록도 열리고 보라도 끝났다.
+        self.copy_pending = list(plan)
+        self.copy_stock = stock       # 끌기 복도 검사가 순회 좌표까지 보게
+        self.copy_placed = {}
+        self.copy_occ = dict(occ)
         ok = True
-        placed = {}
-        for hz_i, dst, color, ang in plan:
-            lst = stock.get(color) or []
-            if not lst:
-                self.get_logger().warn(f"인간{hz_i}번의 {color} — 프리구역에 없어 건너뜀")
-                push_stock(color, f"인간{hz_i}번 → 로봇{dst}번 건너뜀")
-                ok = False
-                continue
-            det = lst.pop(0)              # 같은 색이 여럿이면 하나씩 소비한다
-            xy = (det["pose"][0], det["pose"][1])
-            self.get_logger().info(
-                f"── 인간{hz_i}번의 {color} {ang:+.0f}° → 로봇{dst}번  "
-                f"(프리 ({xy[0]:.0f}, {xy[1]:.0f}) 에서 집기) ──")
-            if self.pick_cached(color, xy, dst, angle=ang):
-                placed[dst] = color
-                # 한 개 놓을 때마다 바로 보낸다. 네 개를 다 끝내고 한꺼번에 보내면
-                # 2분 넘게 화면이 그대로여서 진행 중인지 멈춘 건지 알 수가 없다.
-                push_zone("robot", dst, color)
-            else:
-                ok = False
+        try:
+            # **집을 수 있는 것부터 전부 로봇구역에 보내고, 막힌 것은 나중에.**
+            # 계획 순서대로 밀어붙이면 앞 순번이 막혔을 때 그것부터 풀려고
+            # 판을 흔들어 놓고 시작한다. 하나씩 빠질 때마다 판이 헐거워져
+            # 막혀 있던 것도 저절로 열리는 일이 잦다. 막힌 것만 남았을 때
+            # 비로소 밀기·치우기가 나선다.
+            while self.copy_pending:
+                item, ready = self.choose_next(stock)
+                if item is None:
+                    break
+                hz_i, dst, color, ang = item
+                lst = stock.get(color) or []
+                if not lst:
+                    self.get_logger().warn(f"인간{hz_i}번의 {color} — 프리구역에 없어 건너뜀")
+                    push_stock(color, f"인간{hz_i}번 → 로봇{dst}번 건너뜀")
+                    self.copy_pending.remove(item)
+                    ok = False
+                    continue
+                if not ready:
+                    self.get_logger().warn(
+                        f"남은 것이 다 막혀 있습니다 — 인간{hz_i}번의 {color} 부터 "
+                        "밀거나 치워서 풀어 봅니다")
+                det = lst.pop(0)          # choose_next 가 집기 쉬운 순으로 정렬해 뒀다
+                xy = (det["pose"][0], det["pose"][1])
+                # **집기 전에** 뺀다 — 이 블록을 집다가 relocate 가 돌면, 그 안에서
+                # 지금 이 항목을 '아직 안 한 것' 으로 보고 또 보내려 할 수 있다.
+                self.copy_pending.remove(item)
+                self.get_logger().info(
+                    f"── 인간{hz_i}번의 {color} {ang:+.0f}° → 로봇{dst}번  "
+                    f"(프리 ({xy[0]:.0f}, {xy[1]:.0f}) 에서 집기) ──")
+                if self.pick_cached(color, xy, dst, angle=ang):
+                    self.copy_placed[dst] = color
+                    # 한 개 놓을 때마다 바로 보낸다. 네 개를 다 끝내고 한꺼번에 보내면
+                    # 2분 넘게 화면이 그대로여서 진행 중인지 멈춘 건지 알 수가 없다.
+                    push_zone("robot", dst, color)
+                else:
+                    ok = False
+        finally:
+            # 복제 밖(run_one 등)에서는 이 길이 없어야 한다 — 남겨 두면 다음 명령이
+            # 지난 계획을 보고 엉뚱한 구역으로 보낸다.
+            placed = self.copy_placed
+            self.copy_pending = self.copy_occ = self.copy_stock = None
+            self.copy_placed = {}
         if placed:
             # 마무리로 전체를 한 번 더 맞춘다 — 중간에 놓친 갱신이 있어도 여기서 정리된다.
             push_zones("robot", {**occ, **placed}, sorted(self.cfg["zones"]))
@@ -1331,6 +1622,70 @@ class BlockSort(Node):
         return self._adopt(dets[0], quiet=quiet)
 
     # ── 동작 ──
+    def rise(self, target_z, why=""):
+        """지금 자리에서 **수직으로만** 올린다. xy 는 건드리지 않는다.
+
+        target_z 가 안 되면 **지금 높이 + LIFT_FALLBACK 만큼만** 올려 본다.
+        판 바깥쪽에서는 250mm 까지 뻗는 자세에 IK 해가 없어 컨트롤러가 조용히
+        거부하는데(실측 2026-08-08), 거기서 포기하면 물린 채로 판을 대각선으로
+        지나가 다른 블록을 친다. 조금이라도 올리면 그만큼 안전해진다.
+
+        이미 충분히 높으면 아무것도 하지 않고 True.
+        """
+        try:
+            cur = list(get_current_posx()[0])
+        except Exception as e:
+            self.get_logger().warn(f"현재 높이를 못 읽어 상승을 건너뜁니다({e})")
+            return False
+        if cur[2] >= target_z - MOVE_TOL:
+            return True
+        tag = f"{why} " if why else ""
+        full = list(cur); full[2] = target_z
+        if movel(full):
+            self.get_logger().info(
+                f"{tag}수직 상승 {cur[2]:.0f} → {target_z:.0f}mm")
+            return True
+        # 물러나기 — 지금 높이에서 조금만.
+        low = list(cur); low[2] = cur[2] + LIFT_FALLBACK
+        if movel(low):
+            self.get_logger().warn(
+                f"{tag}{target_z:.0f}mm 까지 못 올라가 {LIFT_FALLBACK:.0f}mm 만 "
+                f"올립니다 ({cur[2]:.0f} → {low[2]:.0f}mm)")
+            return True
+        self.get_logger().error(
+            f"{tag}수직 상승이 전혀 안 됩니다 ({cur[2]:.0f}mm 에 머무름) "
+            "— 이대로 옮기면 판을 대각선으로 지나갑니다")
+        return False
+
+    def ready_gripper(self, why=""):
+        """**명령을 시작하기 전에 그리퍼를 벌린다.** 물고 있었으면 경고한다.
+
+        닫힌 채로 시작하면 팔이 파지 자세로 내려갈 때 손가락(또는 물고 있던
+        블록)이 판 위의 다른 블록을 들이받는다. go_home() 이 끝에서 벌려 주긴
+        하지만, 앞 명령이 중간에 끊기거나(사람이 Ctrl+C, 모션 거부, 예외) 조종
+        모드를 거쳐 오면 닫힌 상태로 남는다 — 그때가 부딪히는 때다.
+
+        시작할 때 한 번 벌리는 값은 거의 0 인데(그리퍼 동작 한 번), 막아 주는
+        것은 판 위 충돌이라 남는 장사다.
+
+        블록을 물고 있었다면 여기서 **떨어뜨린다.** 그것 말고 할 수 있는 일이
+        없다 — 어디에 놓아야 할지 모르는 블록이고, 문 채로 움직이는 것이 더
+        위험하다. 로그에 남기니 사람이 주워서 판에 되돌려 놓으면 된다.
+        """
+        try:
+            held = grasped()
+        except Exception:
+            held = False
+        if held:
+            msg = "명령 시작 — 그리퍼가 블록을 물고 있습니다. 여기서 놓습니다"
+            self.get_logger().warn(msg + (f" ({why})" if why else ""))
+            push_debug("warn", "파지", "앞 명령에서 물고 있던 블록을 놓습니다")
+        try:
+            gripper.open_gripper()
+            wait_gripper()
+        except Exception as e:
+            self.get_logger().warn(f"그리퍼를 벌리지 못했습니다({e}) — 그대로 진행합니다")
+
     def go_home(self):
         gripper.open_gripper()
         wait_gripper()
@@ -1342,25 +1697,30 @@ class BlockSort(Node):
         R = np.array([[np.cos(r), -np.sin(r)], [np.sin(r), np.cos(r)]])
         return np.array(OFFSET_BASE) + R @ np.array(OFFSET_TOOL)
 
-    def neighbors_xy(self, target_xy, radius=None):
+    def neighbors_xy(self, target_xy, radius=None, self_r=None):
         """지금 시야에서 target 주변에 있는 **다른** 블록들의 중심 (base xy).
 
         색을 전부 물어본다. 팔이 멈춰 있으므로 검출 노드가 촬영 한 번을 6색이
         나눠 쓴다(프레임 캐시가 자세 기준이라 그렇다 — 실측 6색 2.07초).
         """
         radius = NEIGHBOR_R if radius is None else radius
+        # self_r 은 '자기 자신' 으로 볼 반경이다. **빈 자리를 검사할 때는 0 을 준다** —
+        # 그 자리엔 자기 자신이 없으므로, 기본값(SELF_R=30mm)을 그대로 쓰면 30mm
+        # 안의 진짜 블록을 자기 자신으로 착각해 '비었다' 고 답한다.
+        # 그 위에 블록을 내려놓게 되는 자리다(relocate_blocker 의 목적지 검사).
+        self_r = SELF_R if self_r is None else self_r
         out = []
         for color in KNOWN_COLORS:
             for det in self._detect_all(color, quiet=True):
                 p = det["pose"]
                 d = float(np.hypot(p[0] - target_xy[0], p[1] - target_xy[1]))
-                if d < 10.0:
-                    continue                  # 자기 자신
+                if d < self_r:
+                    continue                  # 자기 자신 (블록은 이보다 붙을 수 없다)
                 if d <= radius:
                     out.append((p[0], p[1], color))
         return out
 
-    def aim_between_neighbors(self, pose, allow_relocate=True, _tries=0):
+    def aim_between_neighbors(self, pose, allow_relocate=True, _tries=0, _depth=0):
         """손가락이 내려갈 방향에 블록이 있으면 **손목을 90° 돌린다.**
 
         그리퍼는 한 축의 양쪽에서 손가락이 내려와 안쪽으로 닫힌다. 그 축에 다른
@@ -1403,7 +1763,26 @@ class BlockSort(Node):
             """무한(방해 없음)을 '충분' 으로 읽히게. 'infmm' 은 로그에서 읽기 어렵다."""
             return "충분" if v == float("inf") else f"{v:.0f}mm"
 
+        # 어느 축에서 무엇이 막는지 함께 찍는다 — 이것 없이는 "왜 저 블록을
+        # 치우려 하지" 를 로그로 따라갈 수 없다(실측 2026-08-07 에 그걸로 헤맸다).
+        used = axis + turn
+        lane = []
+        for x, y, c in nb:
+            al, sd = lane_offsets((pose[0], pose[1]), (x, y), used)
+            if abs(sd) < LANE_HALF:
+                lane.append((c, round(abs(al) - BLOCK_MM)))
+        self.get_logger().info(
+            f"파지축 {used % 180:.0f}° — 이 축에서 막는 것: "
+            + (", ".join(f"{c} 틈{g}mm" for c, g in lane) if lane else "없음"))
         if turn:
+            # 손목이 덜 돌아가는 쪽으로 접는다 — 판단은 block_geom.fold_turn 이
+            # 한다(로봇 없이 시험된다). ±90 이 같은 물림인 이유도 거기 적어 두었다.
+            folded = fold_turn(self.last_rot, turn)
+            if folded != turn:
+                self.get_logger().info(
+                    f"손목을 {folded:+.0f}° 로 접습니다 (반대로 돌려도 같은 물림 — "
+                    f"{self.last_rot + turn:+.0f}° 대신 {self.last_rot + folded:+.0f}°)")
+                turn = folded
             self.get_logger().warn(
                 f"옆 블록 때문에 손목을 {turn:+.0f}° 돌립니다 — "
                 f"틈 {mm(gap0)} → {mm(gap)}  [{near}]")
@@ -1422,23 +1801,227 @@ class BlockSort(Node):
                 # 회전(turn)이 아니라 방금 치운 이웃의 각도 위에 다시 더해져
                 # grasp_offset() 이 엉뚱한 방향으로 보정된다.
                 saved_last_rot = self.last_rot
-                moved = self.relocate_blocker((pose[0], pose[1]), axis + turn, nb)
+                moved = self.relocate_blocker((pose[0], pose[1]), axis + turn, nb,
+                                              depth=_depth)
+                if not moved:
+                    # **이 축이 안 되면 반대 축의 방해물을 치워 본다.**
+                    # best_axis 는 '틈이 넓은 축' 을 고르지만, 그 축의 방해물이
+                    # 치울 수 있는 것인지는 보지 않는다. 실측 2026-08-08:
+                    # 축 1°(틈15mm)와 축 91°(틈14mm) 중 1mm 차이로 1° 를 골랐는데,
+                    # 그 축을 막는 보라색은 x=648 이라 팔이 못 닿아 두 번 다
+                    # "블록 위로 접근하지 못해" 로 죽었다. 91° 를 막는 노란색은
+                    # x=597 로 멀쩡히 닿았다 — 축만 바꿨으면 끝났을 일이다.
+                    # 두 축은 어차피 같은 물림이니(정사각 블록), 열 수 있는 쪽을
+                    # 열면 된다.
+                    self.get_logger().warn(
+                        f"파지축 {(axis + turn) % 180:.0f}° 는 못 열었습니다 — "
+                        f"직각 축 {(axis + turn + 90) % 180:.0f}° 의 방해물을 치워 봅니다")
+                    moved = self.relocate_blocker((pose[0], pose[1]),
+                                                  axis + turn + 90.0, nb,
+                                                  depth=_depth)
                 self.last_rot = saved_last_rot
                 if moved:
-                    return self.aim_between_neighbors(pose, allow_relocate, _tries + 1)
+                    # **목표 위로 돌아가서 다시 본다.** 치우고 나면 팔이 치운 자리
+                    # 위에 있어, 그대로 재검출하면 목표 주변이 시야에 제대로 안
+                    # 들어온다 — 방금 치운 것도, 앞서 치운 것도 반영이 안 된다.
+                    # 돌아가서 보면 판의 **지금 상태**로 다시 판단한다(치운 블록은
+                    # 사라졌고, 남은 방해물만 남는다).
+                    if not self.hover_over((pose[0], pose[1])):
+                        self.get_logger().warn("목표 위로 돌아가지 못해 재판단을 건너뜁니다")
+                        return None
+                    return self.aim_between_neighbors(pose, allow_relocate,
+                                                      _tries + 1, _depth)
+            # 여기까지 왔다는 것은 **로봇이 스스로 할 수 있는 것을 다 했다**는 뜻이다.
+            # 사람에게 넘기기 전에 무엇을 시도했는지 남긴다 — 그냥 "치우고 다시
+            # 명령하세요" 만 뜨면 로봇이 아무것도 안 해본 것처럼 보인다.
+            # **시도했는데 실패한 것과 후보가 없던 것을 구별한다.** 예전 문구는
+            # 둘 다 "치울 만한 이웃을 못 찾아" 라고 해서, 로그를 봐야만 실제로
+            # 두 개를 시도했다는 걸 알 수 있었다.
+            failed = len(getattr(self, "_failed_blockers", None) or ())
+            tried = (f"이웃 {_tries}개를 치워 봤지만" if _tries else
+                     "치우기가 꺼져 있어(RELOCATE_BLOCKERS=0)" if not RELOCATE_BLOCKERS
+                     else f"이웃 {failed}개를 치우려다 다 실패해서" if failed
+                     else "치울 만한 이웃을 못 찾아")
             self.get_logger().error(
-                f"양쪽 다 좁습니다 (틈 {mm(gap)} < 손가락 {FINGER_GAP_MIN:.0f}mm) — "
+                f"양쪽 다 좁습니다 (틈 {mm(gap)} < 손가락 {FINGER_GAP_MIN:.0f}mm) — {tried} "
                 + ("경고만 하고 그대로 집습니다 (PICK_WHEN_TIGHT=1)"
-                   if PICK_WHEN_TIGHT else "**집지 않습니다.** 옆 블록을 치우고 다시 명령하세요"))
+                   if PICK_WHEN_TIGHT else
+                   "**집지 않습니다.** 블록 하나를 손으로 떼어 주고 다시 명령하세요"))
             push_debug("warn", "파지",
-                       f"파지 틈 {mm(gap)} — "
+                       f"파지 틈 {mm(gap)} — {tried} "
                        + ("그대로 집습니다" if PICK_WHEN_TIGHT
-                          else "옆 블록을 치우고 다시 명령하세요"))
+                          else "손으로 떼어 주세요"))
             if not PICK_WHEN_TIGHT:
                 return None            # 부르는 쪽(pick)이 파지를 접는다
         return pose
 
-    def relocate_blocker(self, target_xy, axis_deg, neighbors):
+    def in_reach(self, xy):
+        """팔이 확실히 닿는 자리인가. **x 한계만** 본다.
+
+        **틈이 넓다고 집을 수 있는 것은 아니다.** 판 바깥쪽 블록은 주변이 뻥
+        뚫려 있어 '가장 집기 쉬운 것' 으로 뽑히기 쉬운데 정작 팔이 못 간다.
+        실측 2026-08-08: 주황이 (534,186) 과 (751,-155) 두 개였는데 여유가
+        크다는 이유로 x=751 을 골랐다.
+
+        **왜 교시 상자(reach_box)를 안 쓰나.** 처음엔 그걸 썼는데 x 한계가
+        566 이라 너무 좁았다 — 실기에서 멀쩡히 집히는 x=570, 583, 599, 607,
+        624, 626 이 전부 '바깥' 으로 밀려 계획 1번이 맨 뒤로 갔다.
+        그 상자는 손동작 조종용으로 교시한 범위지 팔의 도달 한계가 아니다.
+
+        **왜 x 만 보나.** 5일치 로그 185건을 위치별로 갈라 보니 y 는 무관했다:
+            광축 정렬 중단 59건   x 중앙값 648   |y| 중앙값 116
+            광축 정렬 수렴 126건  x 중앙값 565   |y| 중앙값 133
+            중단 중 x>=630 인 비율 78%  /  수렴 중 x>=630 인 비율 5%
+        같은 날 실기에서도 x=626 까지는 성공했고 x=646, 648 이 "블록 위로
+        접근하지 못해" 로 죽었다. 그 사이에 선을 그었다.
+
+        **거르는 기준이 아니라 고르는 기준**이다 — 안쪽을 먼저 고르고, 안쪽에
+        할 것이 하나도 없을 때만 바깥도 시도한다.
+        """
+        return xy[0] <= REACH_X_MAX
+
+    def choose_next(self, stock):
+        """남은 복제 계획 중 **지금 바로 집을 수 있는 것**을 먼저 고른다.
+
+        돌려주는 것: (계획 항목, 지금 집을 수 있나)
+
+        **왜 순서를 그때그때 고르나.** 계획 순서대로 밀어붙이면, 앞 순번이
+        막혀 있을 때 그것부터 풀려고 이웃을 밀거나 치운다 — 판을 흔들어 놓고
+        시작하는 셈이다. 뒤 순번 중에 지금 그냥 집을 수 있는 것이 있으면
+        그걸 먼저 로봇구역에 보내는 편이 낫다. 하나 빠질 때마다 판이 헐거워져
+        막혀 있던 것도 저절로 열리는 일이 잦다(무작위 배치 400개 검증:
+        정적 순서 88.2% → 그때그때 고르기 89.9%, 더 나빠진 배치는 0개).
+
+        판단은 patrol() 로 이미 모아 둔 좌표만 쓴다 — 로봇을 더 움직이지 않는다.
+        틀려도 손해가 없다. 집을 수 있다고 봤는데 아니면 평소대로 치우기가
+        나서고, 없다고 봤는데 되면 그냥 집힌다.
+        """
+        pend = self.copy_pending or []
+        all_pts = [(d["pose"][0], d["pose"][1])
+                   for lst in stock.values() for d in lst]
+        # 두 바퀴 돈다. **첫 바퀴는 팔이 닿는 것만** 본다 — 틈이 넓어도 판
+        # 바깥이면 못 집는다(in_reach 주석의 실측). 안쪽에 할 게 하나도 없을
+        # 때만 바깥을 본다. 상자 밖이라도 실제로 집히는 자리가 있어서다.
+        for reach_only in (True, False):
+            for item in pend:
+                lst = stock.get(item[2]) or []
+                if not lst:
+                    continue
+                lst[:] = self.graspable_first(lst, stock)   # 개체도 좋은 것부터
+                d = lst[0]
+                xy = (d["pose"][0], d["pose"][1])
+                if reach_only and not self.in_reach(xy):
+                    continue
+                # SELF_R 안쪽은 **이웃이 아니라 자기 자신**이다 — 실제 파지가
+                # 쓰는 neighbors_xy 와 같은 규칙. 이게 없으면 색을 이중 검출한
+                # 유령(빨강/주황 14.8mm)이 진짜 방해물로 잡혀, 멀쩡히 집히는
+                # 블록이 '완전히 막힘' 으로 밀려난다(실측 2026-08-08).
+                others = [p for p in all_pts
+                          if np.hypot(p[0] - xy[0], p[1] - xy[1]) >= SELF_R]
+                _t, gap, _g0 = best_axis(xy, tool_yaw(d["pose"][3:]), others)
+                if gap >= FINGER_GAP_MIN:
+                    if not reach_only:
+                        self.get_logger().warn(
+                            f"인간{item[0]}번의 {item[2]} ({xy[0]:.0f},{xy[1]:.0f}) 는 "
+                            "판 바깥이지만 안쪽에 할 것이 없어 시도합니다")
+                    return item, True
+        return (pend[0], False) if pend else (None, False)
+
+    def graspable_first(self, dets, stock, why=""):
+        """같은 색 후보들을 **집기 쉬운 순**으로 다시 늘어놓는다 (판단은 block_geom).
+
+        dets   그 색의 검출들(_detect_all 형식). 원본을 건드리지 않고 새 리스트.
+        stock  {색: [검출, ...]} — 순회에서 본 전부. 이웃 판정의 재료다.
+
+        검출 노드가 주는 신뢰도 순은 집기 쉬움과 무관하다. 사방이 포위된 것을
+        먼저 집으려 들면 이웃 치우기가 발동하고, 그것마저 실패하면 사람에게
+        치워 달라고 한다 — 고를 수 있을 때 고르는 편이 언제나 싸다.
+        """
+        if len(dets) < 2:
+            return list(dets)
+        all_pts = [(d["pose"][0], d["pose"][1])
+                   for lst in stock.values() for d in lst]
+        by_xy = {(round(d["pose"][0], 1), round(d["pose"][1], 1)): d for d in dets}
+        pts = [(d["pose"][0], d["pose"][1], tool_yaw(d["pose"][3:])) for d in dets]
+        out = []
+        for p in pick_order(pts, all_pts, self_r=SELF_R):
+            d = by_xy.get((round(p[0], 1), round(p[1], 1)))
+            if d is not None and d not in out:
+                out.append(d)
+        for d in dets:                      # 혹시 빠진 것이 있으면 뒤에 붙인다
+            if d not in out:
+                out.append(d)
+        # **닿는 것을 먼저.** 틈이 넓다고 집을 수 있는 것은 아니다 — 판 바깥쪽
+        # 블록은 주변이 뻥 뚫려 '가장 집기 쉬운 것' 으로 뽑히기 쉬운데 팔이
+        # 거기까지 못 간다(in_reach 주석의 실측 참고). 여유 순서는 그대로 두고
+        # 닿는 것들을 앞으로만 당긴다 — 안정 정렬이라 같은 무리 안 순서는 유지된다.
+        far = [d for d in out if not self.in_reach(d["pose"])]
+        if far and len(far) < len(out):
+            out = [d for d in out if self.in_reach(d["pose"])] + far
+            where = ", ".join(f"({d['pose'][0]:.0f},{d['pose'][1]:.0f})" for d in far)
+            self.get_logger().info(
+                f"{why}판 바깥 {len(far)}개 [{where}] 는 뒤로 미룹니다 "
+                "— 팔이 못 닿을 수 있습니다")
+        if out[0] is not dets[0]:
+            self.get_logger().info(
+                f"{why}같은 색 {len(dets)}개 중 집기 쉬운 것을 고릅니다 — "
+                f"({dets[0]['pose'][0]:.0f},{dets[0]['pose'][1]:.0f}) 대신 "
+                f"({out[0]['pose'][0]:.0f},{out[0]['pose'][1]:.0f})")
+        return out
+
+    def pending_target(self, color):
+        """이 색이 지금 복제 계획에서 **아직 안 옮긴 항목**이면 그 항목, 아니면 None.
+
+        copy_human() 이 돌 때만 값이 있다(self.copy_pending). 색·구역 지정 명령
+        (run_one) 처럼 계획이 없는 길에서는 None 이라, 예전처럼 임시 자리로 치운다.
+
+        목적지가 이미 찬 항목은 고르지 않는다 — copy_human 이 계획을 세울 때
+        걸렀지만, 그 뒤 이 실행 중에 우리가 채웠을 수 있다.
+        """
+        for item in (getattr(self, "copy_pending", None) or []):
+            _hz_i, dst, c, _ang = item
+            if c != color:
+                continue
+            if dst in (getattr(self, "copy_placed", None) or {}):
+                continue                       # 이번 실행에서 이미 채웠다
+            if (getattr(self, "copy_occ", None) or {}).get(dst) not in (None, color):
+                continue                       # 다른 색이 놓여 있다
+            return item
+        return None
+
+    def relocate_to_zone(self, item, bxy, allow_chain=False, depth=0):
+        """막고 있는 블록을 임시 자리가 아니라 **제 목적지 구역**으로 보낸다.
+
+        치우기와 계획 수행을 한 번의 이동으로 합친다. 성공하면 그 계획 항목은
+        끝난 것으로 표시되어 copy_human 의 차례에서 건너뛴다.
+
+        실패하면 False 를 돌려주고 **임시 자리로 물러나지 않는다** — 같은 블록을
+        같은 방법으로 다시 집으려는 것이라 또 실패할 뿐이고, 그 사이 팔만 더
+        움직인다. 부르는 쪽(aim_between_neighbors)이 원래대로 파지를 접는다.
+        """
+        hz_i, dst, color, ang = item
+        self.get_logger().warn(
+            f"{color}({bxy[0]:.0f},{bxy[1]:.0f})가 막고 있는데 이 계획에서 "
+            f"로봇{dst}번에 갈 색입니다 — 옆으로 치우지 않고 곧장 놓습니다")
+        push_debug("info", "파지", f"막는 {color} 를 로봇{dst}번으로 바로 보냅니다")
+        pose = self.detect(color, near=bxy, max_dist=CACHE_TOLERANCE)
+        if pose is None:
+            self.get_logger().error(f"막고 있는 {color} 를 다시 못 찾았습니다")
+            return False
+        # allow_relocate=False — 이 블록 자신의 이웃까지 옮기기 시작하면 연쇄가
+        # 끝없이 번진다(임시 치우기와 같은 이유로 한 단계에서 멈춘다).
+        if not self.pick(pose, allow_relocate=allow_chain, _depth=depth + 1):
+            self.get_logger().error(f"{color} 를 집지 못했습니다")
+            return False
+        self.place(dst, angle=ang)
+        self.copy_pending.remove(item)
+        self.copy_placed[dst] = color
+        push_zone("robot", dst, color)
+        self.get_logger().info(
+            f"완료: 인간{hz_i}번의 {color} → 로봇 {dst}번  (막는 것을 치우며 함께 끝냄)")
+        return True
+
+    def relocate_blocker(self, target_xy, axis_deg, neighbors, depth=0):
         """axis_deg 축을 막고 있는 이웃 블록 하나를 옆으로 옮겨 자리를 만든다.
 
         1. 어느 이웃이 막는지 block_geom.blocking_neighbor 로 찾는다 — 판정
@@ -1455,23 +2038,275 @@ class BlockSort(Node):
         성공하면 True. 실패해도 예외를 올리지 않는다 — 부르는 쪽이 원래
         하던 대로(경고 후 파지 포기) 계속하면 된다.
         """
-        bxy = blocking_neighbor(target_xy, axis_deg, [(x, y) for x, y, _c in neighbors])
-        if bxy is None:
+        # **집을 수 있는 이웃**을 고른다. 가장 가까운 이웃(blocking_neighbor)을
+        # 그냥 집으려 하면 자기 발에 걸린다 — 그 이웃 입장에서는 원래 목표가
+        # 자기 이웃이라(붙어 있으니 막은 것이다) 같은 '좁음' 판정에 걸려 파지가
+        # 포기되고, 치우기가 시작조차 못 한다(실측 2026-08-07: "파란색을 치우라" 는
+        # 말만 반복했다). 그래서 두 축 중 한쪽이라도 열린 이웃을 고른다.
+        # **이 축에서 막고 있고, 그 자신을 집을 수 있는** 이웃을 고른다.
+        #
+        # 두 가지를 다 봐야 한다. 지금 쓰려는 축과 무관한 블록을 치우면 헛수고고
+        # (실측: 축 119.8°에서 막는 것은 파랑·보라인데 주황을 치웠다), 집을 수
+        # 없는 블록을 고르면 치우기가 시작조차 못 한다(그 이웃 입장에서는 원래
+        # 목표가 자기 이웃이라 같은 '좁음' 판정에 걸린다).
+        #
+        # 손가락은 **양쪽에서** 내려오므로 한 축을 열려면 그 축의 양쪽을 다
+        # 치워야 한다. 한 번에 하나씩 치우고, 목표 위로 돌아가 다시 보는 것을
+        # RELOCATE_MAX_TRIES 만큼 되풀이한다 — 앞서 치운 것은 그 재검출에
+        # 반영된다(치운 블록은 이미 그 자리에 없다).
+        pts = [(x, y) for x, y, _c in neighbors]
+        cand = axis_blockers(target_xy, axis_deg, pts)
+        if not cand:
+            return False                   # 이 축을 막는 게 아예 없다
+
+        # **하나 실패했다고 접지 않는다.** 집을 수 있는 것부터 차례로 시도하고,
+        # 그것들이 다 안 되면 못 집는 것까지 내려가 **그 블록의 방해물부터**
+        # 치운다(연쇄, RELOCATE_CHAIN 단계까지). 예전에는 최선 하나만 골라
+        # 그게 실패하면 통째로 포기했고, 서로 붙은 뭉치는 곧장 사람에게
+        # 넘겼다 — 실측 2026-08-08: 보라 하나를 못 집어서 초록까지 같이 죽었다.
+        # **팔이 못 닿는 블록은 후보에서 뺀다.** 치우려면 그것을 집어야 하는데
+        # 못 가면 몇 번을 해도 실패한다. 실측 2026-08-08 (로그 185606):
+        # 노란색(660,84) 를 끌기 6회·들어 옮기기 6회, 합쳐 12번 시도하는 동안
+        # 20번의 검출에서 좌표가 1mm 도 안 변했다 — 129초를 그렇게 썼다.
+        # 여기서 걸러야 남은 후보나 직각 축으로 넘어갈 수 있다.
+        # 이번 파지에서 이미 실패한 blocker 는 다시 고르지 않는다. 같은 이유로
+        # 또 실패할 뿐이고, 그 사이 팔만 왕복한다(실측: 같은 노란색에 12번).
+        tried = getattr(self, "_failed_blockers", None) or set()
+        again = [b for b, _r, _ok in cand
+                 if any(np.hypot(b[0] - t[0], b[1] - t[1]) < 15.0 for t in tried)]
+        if again:
+            where = ", ".join(f"({b[0]:.0f},{b[1]:.0f})" for b in again)
+            self.get_logger().info(
+                f"이미 실패한 {len(again)}개 [{where}] 는 다시 시도하지 않습니다")
+        cand = [(b, r, ok) for b, r, ok in cand
+                if not any(np.hypot(b[0] - t[0], b[1] - t[1]) < 15.0 for t in tried)]
+        if not cand:
             return False
-        color = next((c for x, y, c in neighbors
-                     if np.hypot(x - bxy[0], y - bxy[1]) < 1.0), None)
-        if color is None:
-            return False
-        dest = relocate_step(target_xy, bxy, axis_deg)
-        if dest is None:
-            return False
-        blocked = [n for n in self.neighbors_xy(dest, radius=BLOCK_MM + FINGER_GAP_MIN)
-                  if np.hypot(n[0] - bxy[0], n[1] - bxy[1]) > 5.0]
-        if blocked:
+
+        far = [b for b, _r, _ok in cand if not self.in_reach(b)]
+        if far:
+            where = ", ".join(f"({b[0]:.0f},{b[1]:.0f})" for b in far)
             self.get_logger().warn(
-                f"{color}({bxy[0]:.0f},{bxy[1]:.0f})를 옮길 자리"
-                f"({dest[0]:.0f},{dest[1]:.0f})도 다른 블록에 막혀 포기합니다")
+                f"막는 것 중 {len(far)}개 [{where}] 는 팔이 못 닿아 건너뜁니다 "
+                f"(x > {REACH_X_MAX:.0f})")
+        cand = [(b, room, ok) for b, room, ok in cand if self.in_reach(b)]
+        if not cand:
+            self.get_logger().error(
+                "이 축을 막는 블록이 전부 팔이 못 닿는 자리에 있습니다 — "
+                "손으로 안쪽으로 옮겨 주세요")
+            push_debug("warn", "파지", "막는 블록이 팔 닿는 범위 밖입니다")
             return False
+
+        easy = [(b, room) for b, room, ok in cand if ok]
+        hard = [(b, room) for b, room, ok in cand if not ok]
+        if hard and depth >= RELOCATE_CHAIN:
+            hard = []                      # 더 파고들지 않기로 한 깊이
+        if not easy and not hard:
+            self.get_logger().error(
+                "이 축을 막는 블록들이 서로도 붙어 있고 더 파고들 수 없습니다 — "
+                f"블록 하나를 손으로 떼어 주세요 (RELOCATE_CHAIN={RELOCATE_CHAIN})")
+            push_debug("warn", "파지",
+                       "블록들이 서로 붙어 있어 로봇이 풀 수 없습니다 — 하나를 떼어 주세요")
+            return False
+        if len(easy) + len(hard) > 1:
+            self.get_logger().info(
+                f"이 축을 막는 것 {len(cand)}개 — 집을 수 있는 것 {len(easy)}개부터 "
+                f"차례로 시도합니다" + (f" (안 되면 갇힌 것 {len(hard)}개까지 파고듭니다)"
+                                    if hard else ""))
+        for k, (bxy, room) in enumerate(easy + hard, start=1):
+            chained = k > len(easy)
+            color = next((c for x, y, c in neighbors
+                          if np.hypot(x - bxy[0], y - bxy[1]) < 1.0), None)
+            if color is None:
+                continue
+            if chained:
+                self.get_logger().warn(
+                    f"[{k}/{len(easy) + len(hard)}] {color}({bxy[0]:.0f},{bxy[1]:.0f}) "
+                    f"도 갇혀 있습니다(여유 {room:.0f}mm) — 그 블록의 방해물부터 "
+                    f"치웁니다 (연쇄 {depth + 1}단계)")
+            elif len(easy) + len(hard) > 1:
+                self.get_logger().info(
+                    f"[{k}/{len(easy) + len(hard)}] {color}({bxy[0]:.0f},{bxy[1]:.0f}) "
+                    f"시도 (여유 {room:.0f}mm)")
+            # **필요한 블록은 밀지 않는다 — 잡아서 제 구역에 놓는다.**
+            # 이 검사가 끌기보다 **먼저** 와야 한다. 끌기가 앞에 있으면, 어차피
+            # 로봇구역에 갈 색을 판 위 임시 자리로 60mm 밀어 놓고 나중에 제
+            # 차례에 또 집게 된다 — 한 번이면 끝날 일을 두 번 한다.
+            item = self.pending_target(color)
+            if item is not None:
+                if self.relocate_to_zone(item, bxy, allow_chain=chained,
+                                         depth=depth):
+                    return True
+                self.get_logger().warn(
+                    f"{color} 를 로봇{item[1]}번으로 곧장 보내지 못했습니다 "
+                    "— 밀어서 치워 봅니다")
+
+            # 계획에 없는 색이거나 직행이 실패했으면 **끌기**로 치운다. 잡은 채로
+            # 직각 60mm 만 옮기면 되므로 상승·이송·하강·상승 네 번이 빠지고,
+            # 판을 최소한만 흐트러뜨린다.
+            # 들어서 임시 자리로 옮기는 길(relocate_one)은 기본이 꺼져 있다 —
+            # LIFT_RELOCATE 주석 참고. 꺼져 있으면 끌기가 안 될 때 곧장 다음
+            # 후보나 직각 축으로 넘어간다.
+            if SLIDE_BLOCKERS and self.slide_blocker(
+                    bxy, color, target_xy, axis_deg,
+                    allow_chain=chained, depth=depth):
+                return True
+            if LIFT_RELOCATE and self.relocate_one(
+                    bxy, color, target_xy, axis_deg,
+                    allow_chain=chained, depth=depth):
+                return True
+            if not hasattr(self, "_failed_blockers") or self._failed_blockers is None:
+                self._failed_blockers = set()
+            self._failed_blockers.add((bxy[0], bxy[1]))
+            self.get_logger().warn(
+                f"{color}({bxy[0]:.0f},{bxy[1]:.0f}) 는 안 됐습니다"
+                + (" — 다음 후보로 넘어갑니다" if k < len(easy) + len(hard) else ""))
+        return False
+
+    def slide_blocker(self, bxy, color, target_xy, axis_deg,
+                      allow_chain=False, depth=0):
+        """막는 블록을 **잡은 채로 파지축 직각으로 끈다.** 성공하면 True.
+
+        들었다 놓는 것(relocate_one)보다 싸다 — 상승·이송·하강·상승 네 번이
+        빠지고, 수평 이동 한 번으로 끝난다. 블록이 공중에 뜨지 않으니 떨어뜨릴
+        일도 없고, 놓는 높이 오차도 없다.
+
+        **대신 지나가는 길이 비어 있어야 한다.** 끌려가는 블록이 다른 블록을
+        만나면 그것까지 밀어 판이 무너진다 — slide_dests 가 복도를 먼저 본다
+        (로봇 없이 시험된다).
+
+        끌 방향은 파지축의 직각이다. 손가락 길(레인)에서 옆으로 빼는 것이라
+        축을 따라 밀어내는 것보다 짧고, 목표에서 보면 대각선으로 비켜난다.
+        """
+        # **지금 보이는 것 + 순회에서 모아 둔 것**을 함께 본다. 지금 시야에만
+        # 기대면 그 프레임에서 안 잡힌 블록을 들이받는다 — 실측 2026-08-08 의
+        # 충돌이 그것이었다(순회 때 (605,135) 로 봤던 빨강을 못 보고 그 위로 끌었다).
+        # **지금 보이는 것만** 본다. 순회 좌표까지 넣어 봤더니 이미 옮긴 블록이
+        # 유령 장애물로 남아 끌 길을 통째로 막았다(실측 2026-08-08: 노란색·
+        # 파란색 둘 다 "끌 길이 막혀 있습니다" 로 죽었다). 오래된 좌표는
+        # 안전을 더해 주지 않고 멀쩡한 길만 없앤다.
+        nb = self.neighbors_xy(bxy, radius=SLIDE_MM + BLOCK_MM * 2)
+        dests = slide_dests(target_xy, bxy, axis_deg,
+                            others=[(x, y) for x, y, _c in nb],
+                            clear_extra=SLIDE_CLEAR_EXTRA,
+                            check_path=SLIDE_CHECK_PATH)
+        # 끌고 간 자리도 팔이 닿아야 한다 — 못 가면 끌다 말고 멈춘다.
+        dests = [d for d in dests if self.in_reach(d)]
+        if not dests:
+            self.get_logger().info(
+                f"{color}({bxy[0]:.0f},{bxy[1]:.0f}) 는 끌 길이 막혀 있습니다"
+                + (" — 들어서 옮기는 쪽으로 갑니다" if LIFT_RELOCATE
+                   else " — 들어서 옮기기가 꺼져 있어(LIFT_RELOCATE=0) 다음 후보로"))
+            return False
+        dest = dests[0]
+        dx, dy = dest[0] - bxy[0], dest[1] - bxy[1]
+        self.get_logger().warn(
+            f"{color}({bxy[0]:.0f},{bxy[1]:.0f})가 막고 있어 "
+            f"({dest[0]:.0f},{dest[1]:.0f})로 **끕니다** "
+            f"(파지축 {axis_deg % 180:.0f}° 의 직각으로 {SLIDE_MM:.0f}mm)")
+        push_debug("warn", "파지",
+                   f"이웃 {color} 끄는 중 → ({dest[0]:.0f},{dest[1]:.0f})")
+        pose = self.detect(color, near=bxy, max_dist=CACHE_TOLERANCE)
+        if pose is None:
+            self.get_logger().error(f"끌 {color} 를 다시 못 찾았습니다")
+            return False
+        # lift=False — 잡은 자리에 그대로 머문다. 여기서 올라가 버리면 끌기가 아니다.
+        if not self.pick(pose, allow_relocate=allow_chain, _depth=depth + 1,
+                         lift=False):
+            self.get_logger().error(f"{color} 를 집지 못했습니다")
+            return False
+        # **지금 자세에서 xy 만 옮긴다.** 파지 보정이 이미 반영된 실제 TCP 에서
+        # 끌 만큼만 더한다 — 보정을 다시 계산하면 어긋난다.
+        try:
+            cur = list(get_current_posx()[0])
+        except Exception as e:
+            self.get_logger().error(f"현재 자세를 못 읽어 끌기를 중단합니다({e})")
+            return False
+        slid = list(cur)
+        slid[0] += dx
+        slid[1] += dy
+        if not movel(slid):
+            self.get_logger().error("끌기 이동에 실패했습니다 — 그 자리에 놓습니다")
+            gripper.open_gripper(); wait_gripper()
+            up = list(cur); up[2] = max(TRANSIT_Z, cur[2] + self.lift)
+            movel(up)
+            return False
+        gripper.open_gripper(); wait_gripper()
+        up = list(slid); up[2] = max(TRANSIT_Z, slid[2] + self.lift)
+        movel(up)                       # 빈 손으로 물러난다
+        self.get_logger().info(
+            f"{color} 를 {np.hypot(dx, dy):.0f}mm 끌었습니다 (들지 않음)")
+        return True
+
+    def relocate_one(self, bxy, color, target_xy, axis_deg,
+                     allow_chain=False, depth=0):
+        """후보 하나를 실제로 치운다. 성공하면 True, 안 되면 False(부르는 쪽이 다음 후보).
+
+        allow_chain 이면 이 블록을 집을 때 **그 블록의 방해물도 치우게** 한다
+        (연쇄). 갇힌 블록을 고른 경우라서, 그러지 않으면 집을 수가 없다.
+        """
+        # 직행(pending_target → relocate_to_zone)은 부르는 쪽에서 **이미** 봤다.
+        # 여기까지 왔다는 것은 계획에 없는 색이거나 직행이 실패했다는 뜻이라,
+        # 임시 자리로 치우는 것이 맞다.
+
+        # 판 경계. 후보를 걸러야 하므로 **먼저** 구한다.
+        # block_sort 에는 판 경계가 없었다 — 경계는 조종 쪽 교시 상자를 빌린다
+        # (reach_box). 그것도 없으면 구역 좌표를 감싸는 상자로 물러난다.
+        box = reach_box()
+        if box is None:
+            zs = self.all_zone_xy()
+            m = ZONE_RADIUS + BLOCK_MM
+            box = (min(p[0] for p in zs) - m, max(p[0] for p in zs) + m,
+                   min(p[1] for p in zs) - m, max(p[1] for p in zs) + m)
+        bx0, bx1, by0, by1 = box
+
+        # 치울 자리를 **여러 곳** 본다. 한 곳만 계산하면 그 자리가 막혔을 때
+        # 그대로 포기한다(실측 2026-08-07: 유일한 후보가 51.6mm 옆 블록 때문에
+        # 거부돼 치우기가 무산됐다 — 겹치지도 않는 거리였다).
+        # 두 단계로 본다. ① 파지 여유가 나는 자리를 먼저 찾고, 없으면
+        # ② 겹치지만 않는 자리로 물러난다 — 임시로 치워 두는 자리다.
+        # 세 번째 단계('구역무시')는 RELOCATE_ANYWHERE 일 때만 붙는다 — 프리구역을
+        # 먼저 다 보고, 거기에 자리가 없을 때만 구역 안을 허용한다. 판 밖(reach_box)은
+        # 어느 단계에서도 허용하지 않는다 — 팔이 닿지 않는 것은 취향이 아니라 물리다.
+        cands = relocate_candidates(target_xy, bxy, axis_deg)
+        tiers = [("파지여유", BLOCK_MM + FINGER_GAP_MIN, True),
+                 ("겹침없음", RELOCATE_CLEAR_MIN, True)]
+        if RELOCATE_ANYWHERE:
+            tiers.append(("구역무시", RELOCATE_CLEAR_MIN, False))
+        dest, tier = None, None
+        for tname, need, free_only in tiers:
+            for c in cands:
+                if free_only and not self.is_free(c):
+                    continue                        # 구역 안 — 프리구역을 먼저 본다
+                if not (bx0 <= c[0] <= bx1 and by0 <= c[1] <= by1):
+                    continue                        # 판 밖
+                # self_r=0 — 빈 자리를 보는 것이라 '자기 자신' 이 없다.
+                # 옮길 블록 자신만 뺀다(곧 그 자리를 비운다).
+                if [n for n in self.neighbors_xy(c, radius=need, self_r=0.0)
+                        if np.hypot(n[0] - bxy[0], n[1] - bxy[1]) > 5.0]:
+                    continue
+                dest, tier = c, tname
+                break
+            if dest is not None:
+                break
+        if dest is None:
+            self.get_logger().warn(
+                f"{color}({bxy[0]:.0f},{bxy[1]:.0f})를 치울 자리를 못 찾았습니다 "
+                f"— 후보 {len(cands)}곳(사방 {RELOCATE_WIDE_R[-1]:.0f}mm까지 훑음)이 "
+                + ("모두 막힘·판밖입니다" if RELOCATE_ANYWHERE
+                   else "모두 막힘·구역·판밖입니다 (RELOCATE_ANYWHERE=1 이면 구역도 씁니다)")
+                + ". 사람이 치워 주세요")
+            push_debug("warn", "파지", f"{color} 를 치울 자리가 없습니다")
+            return False
+        self.get_logger().info(
+            f"치울 자리 후보 {len(cands)}곳 중 ({dest[0]:.0f},{dest[1]:.0f}) 선택 "
+            f"[{tier}] — blocker 에서 {np.hypot(dest[0] - bxy[0], dest[1] - bxy[1]):.0f}mm")
+        if tier == "구역무시":
+            # 조용히 넘어가면 안 된다 — 배치가 왜 흐트러졌는지 나중에 알 수가 없다.
+            self.get_logger().warn(
+                "프리구역에 자리가 없어 **구역 안**에 치웁니다 — 그 칸의 배치가 "
+                "흐트러집니다 (RELOCATE_ANYWHERE=0 이면 대신 포기합니다)")
+            push_debug("warn", "파지", "프리구역에 자리가 없어 구역 안에 치웁니다")
         self.get_logger().warn(
             f"{color}({bxy[0]:.0f},{bxy[1]:.0f})가 막고 있어 "
             f"({dest[0]:.0f},{dest[1]:.0f})로 치웁니다")
@@ -1481,25 +2316,34 @@ class BlockSort(Node):
         if pose is None:
             self.get_logger().error(f"치울 {color} 를 다시 못 찾았습니다")
             return False
-        if not self.pick(pose, allow_relocate=False):
-            self.get_logger().error(f"{color} 를 집지 못해 치우기를 포기합니다")
+        if not self.pick(pose, allow_relocate=allow_chain, _depth=depth + 1):
+            self.get_logger().error(f"{color} 를 집지 못했습니다")
             return False
         dest_pose = list(pose)
         dest_pose[0], dest_pose[1] = dest
         self.place_at(dest_pose, taught=False)
         return True
 
-    def pick(self, pose, allow_relocate=True):
+    def pick(self, pose, allow_relocate=True, _depth=0, lift=True):
         """접근 → 하강 → 파지 → 확인. 성공하면 True.
 
         allow_relocate=False 는 relocate_blocker 가 치울 이웃 자신을 집을 때
         쓴다 — 연쇄적으로 또 다른 이웃을 옮기기 시작하지 않게 막는다.
+
+        lift=False 는 **잡은 자리에 그대로 머문다**(끌기용). 들어 올리지 않으므로
+        부르는 쪽이 곧바로 수평 이동해 블록을 끌 수 있다 — 상승·하강 두 번이
+        통째로 빠진다. 끌기가 끝나면 부르는 쪽이 직접 올라와야 한다.
         """
+        if _depth == 0:
+            # 새 목표를 집기 시작한다 — 지난 목표에서 실패한 blocker 기록을 비운다.
+            # (연쇄로 들어온 호출은 _depth>0 이라 기록을 이어받는다)
+            self._failed_blockers = set()
         pose = list(pose)
         # 손목 방향을 먼저 정한다 — 파지 보정이 손목 각도에 딸려 있어서,
         # 보정을 더한 뒤에 돌리면 보정이 틀린 방향으로 남는다.
         # None 이면 옆 블록에 막혀 내려갈 자리가 없다는 뜻이다.
-        pose = self.aim_between_neighbors(pose, allow_relocate=allow_relocate)
+        pose = self.aim_between_neighbors(pose, allow_relocate=allow_relocate,
+                                          _depth=_depth)
         if pose is None:
             return False
         g = self.grasp_offset()
@@ -1507,6 +2351,21 @@ class BlockSort(Node):
             f"파지 보정 ({g[0]:+.1f}, {g[1]:+.1f}) @ 손목 {self.last_rot:+.0f}°")
         pose[0] += g[0]
         pose[1] += g[1]
+        # 6번 축이 기준 각도면 여기서 함께 얹는다 — 좌표에 미리 반영하므로
+        # 접근·하강 경로가 그대로고 추가 이동이 없다.
+        t, j6 = j6_tweak(pose)
+        if t.any():
+            self.get_logger().info(
+                f"6번 축 {j6:+.1f}° (기준 {J6_TWEAK_AT:+.0f}±{J6_TWEAK_W:.0f}°) "
+                f"— 파지 보정 {J6_TWEAK_FRAME} ({J6_TWEAK_XY[0]:+.0f}, "
+                f"{J6_TWEAK_XY[1]:+.0f}) → base ({t[0]:+.1f}, {t[1]:+.1f}) 추가 "
+                f"[공구방위 {tool_yaw(pose[3:]):+.0f}°]")
+            pose[0] += t[0]
+            pose[1] += t[1]
+        elif j6 is not None:
+            self.get_logger().info(
+                f"6번 축 {j6:+.1f}° — 기준({J6_TWEAK_AT:+.0f}±{J6_TWEAK_W:.0f}°) "
+                "밖이라 추가 보정 없음")
 
         # 접근과 이송을 나눈다.
         #
@@ -1543,7 +2402,17 @@ class BlockSort(Node):
             wait_gripper()
             if grasped():
                 self.get_logger().info(f"파지 성공 (시도 {attempt})")
-                movel(up)                    # 물었으니 이송 높이로
+                if lift:
+                    # **순수 수직 상승.** up 은 pose 와 xy 가 같고 z 만 다르다.
+                    #
+                    # 물린 직후라 컨트롤러가 아직 앞 모션을 정리 중일 수 있고,
+                    # 그 틈에 넣은 movel 은 조용히 삼켜진다(실측 2026-08-08:
+                    # 263mm 상승이 0.13초씩 3번 다 "안 갔음" 으로 끝났다).
+                    # 그래서 **넣기 전에 컨트롤러가 멎기를 기다린다** — 이것만으로
+                    # 대부분 해결된다. 그래도 안 되면 경고만 남기고 그대로 간다:
+                    # 여기서 접으면 물린 블록을 든 채 명령이 끝나 버린다.
+                    wait_idle()
+                    self.rise(up[2], "파지 후")
                 return True
             self.get_logger().warn(f"빈손 — 시도 {attempt}/{GRASP_RETRY}")
             gripper.open_gripper(); wait_gripper()
@@ -1563,11 +2432,20 @@ class BlockSort(Node):
             g = self.grasp_offset()
             p[0] += g[0]
             p[1] += g[1]
-        # 목표 위 이송 높이로 먼저 간 뒤 수직으로 내린다. 낮게 가로지르면
-        # 물고 있는 블록이 판 위의 다른 블록을 친다.
+        # **수직으로 올리고 → 수평으로 옮기고 → 수직으로 내린다.** 이 순서를
+        # 지켜야 물고 있는 블록이 판 위의 다른 블록을 안 친다.
         up = list(p); up[2] = max(TRANSIT_Z, p[2] + self.lift)
-        movel(up)
-        movel(p)
+
+        # 올리는 것을 **여기서 한 번 더 보장한다.** pick() 이 이미 올렸어야 하지만
+        # 그 movel 이 씹히는 일이 있다(실측 2026-08-08: 기동 후 첫 파지에서
+        # 263mm 상승이 3회 다 무시됐다). 그 상태로 아래 movel(up) 을 넣으면
+        # 목적지 위 z=250 으로 가면서 **상승과 xy 이동을 동시에** 하게 되어,
+        # 판을 대각선으로 훑는 바로 그 경로가 된다.
+        # 지금 자리에서 z 만 올리는 것이라 이미 높으면 movel 이 즉시 통과한다.
+        self.rise(up[2], "옮기기 전")
+
+        movel(up)                        # 목적지 위로 (수평 이동)
+        movel(p)                         # 순수 z 하강
         gripper.open_gripper(); wait_gripper()
         movel(up)
 
@@ -1864,6 +2742,7 @@ class BlockSort(Node):
         끌려오고 놓을 때 그 자리에 남으므로 블록은 P+e 에 놓인다.
         따라서 (재검출 위치 − 원래 위치) 가 곧 e 다.
         """
+        self.ready_gripper("파지 보정 측정")
         errs = []
         for i in range(1, n + 1):
             self.go_home()
@@ -1918,6 +2797,7 @@ class BlockSort(Node):
         팔 위치와 다르다 — 실측 시야중심으로 2번이 안쪽(로봇3·4),
         3번이 바깥쪽(로봇1·2)을 본다.
         """
+        self.ready_gripper("구역 확인")
         pts = self.scan_points()
         if not pts:
             return {}
@@ -1946,6 +2826,7 @@ class BlockSort(Node):
 
         구역 번호를 주면 그 구역에 있는 블록을 색과 무관하게 집는다.
         """
+        self.ready_gripper(f"{target} → {zone}번")
         if zone not in self.cfg["zones"]:
             self.get_logger().error(f"{zone}번 구역이 없습니다. "
                                     f"가능: {sorted(self.cfg['zones'])}")
@@ -2000,6 +2881,10 @@ class BlockSort(Node):
             push_stock(target, "명령을 수행할 수 없습니다")
             self.go_home()
             return False
+        # 같은 색이 여럿 보이면 **집기 쉬운 것**을 고른다. 검출 신뢰도 1등이
+        # 사방에 포위돼 있으면, 바로 옆에 뻥 뚫린 같은 색을 두고도 이웃 치우기가
+        # 발동한다 — 고를 수 있을 때 고르는 편이 치우기보다 싸다.
+        lst = self.graspable_first(lst, stock)
         xy = (lst[0]["pose"][0], lst[0]["pose"][1])
         self.get_logger().info(
             f"{target} 발견 ({xy[0]:.0f}, {xy[1]:.0f})"
@@ -2360,6 +3245,7 @@ class BlockSort(Node):
                 # 손동작 조종으로 넘어간다. **같은 프로세스 안에서** 돈다 —
                 # 이 함수가 돌아올 때까지 수어 명령은 받지 않으므로, 제어모드
                 # 중에 수어가 오인식돼 팔이 멋대로 나가는 일도 없다.
+                self.ready_gripper("조종 모드")
                 ok = self.run_teleop(rec)
                 if once:
                     return ok
