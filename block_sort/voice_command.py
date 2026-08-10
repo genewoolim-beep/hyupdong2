@@ -52,7 +52,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RECORD_SECONDS = int(os.environ.get("VOICE_RECORD_SEC", 5))
 WAKE_MODEL_PATH = os.environ.get(
     "VOICE_WAKE_MODEL", os.path.join(HERE, "hello_rokey_8332_32.tflite"))
-WAKE_THRESHOLD = float(os.environ.get("VOICE_WAKE_THRESHOLD", 0.3))
+WAKE_THRESHOLD = float(os.environ.get("VOICE_WAKE_THRESHOLD", 0.4))
 LEVEL_GAIN = float(os.environ.get("VOICE_LEVEL_GAIN", 6.0))   # 레벨 바 표시용 증폭 배수
 
 # ── 모드 전환·확인 문구 ──────────────────────────────────────────────
