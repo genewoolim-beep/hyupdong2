@@ -45,9 +45,10 @@ from od_msg.srv import SrvDepthPosition
 # 순간 DSR 에 붙어서 로봇 없이는 시험할 수 없기 때문이다 — 책상에서 확인할 수
 # 있는 계산은 block_geom 에 모아 test_copy_angle.py 가 그대로 시험한다.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from block_geom import (BLOCK_MM, LANE_HALF, RELOCATE_CLEAR_MIN,
+from block_geom import (BLOCK_MM, RELOCATE_CLEAR_MIN,
                         RELOCATE_WIDE_R, SLIDE_MM, axis_blockers, best_axis,
-                        fold90, fold_turn, lane_offsets, pick_order,
+                        fold90, fold_turn, lane_offsets, nb_half, nb_lane,
+                        pick_order,
                         slide_dests,
                         relocate_candidates, reorder_for_conflicts, rotate_tool,
                         tool_yaw)   # noqa: E402
@@ -978,6 +979,9 @@ class BlockSort(Node):
         self.last_angle = 0.0      # 마지막 검출의 블록 기울기 (도)
         self.last_cam = [0.0, 0.0, 0.0]   # 마지막 검출의 카메라 좌표
         self.last_rot = GRASP_ROT         # 마지막 검출에서 쓴 손목 각도
+        # 상승이 물러선 자리 (x, y, 목표z). 같은 자리에서 두 번 얹지 않으려고
+        # 남긴다 — rise() 주석 참고.
+        self._lift_capped = None
 
     # ── 좌표 변환 (기존 robot_control.py 와 동일) ──
     @staticmethod
@@ -1317,7 +1321,7 @@ class BlockSort(Node):
         # 좌표만으로 판단하므로 로봇을 더 움직이지 않는다 — block_geom.py 에서
         # 로봇 없이 검증된다(test_reorder.py).
         if REORDER_FOR_BLOCKING:
-            positions = {c: [(d["pose"][0], d["pose"][1]) for d in dets]
+            positions = {c: [(d["pose"][0], d["pose"][1], d["angle"]) for d in dets]
                         for c, dets in stock.items()}
             reordered = reorder_for_conflicts(plan, positions)
             if reordered != plan:
@@ -1452,7 +1456,7 @@ class BlockSort(Node):
                 f"({pose[0]:.0f}, {pose[1]:.0f}) — 건너뜁니다.")
             return False
         self.get_logger().info(f"파지 목표 {[round(v, 1) for v in pose[:3]]}")
-        if not self.pick(pose):
+        if not self.pick(pose, color=color):
             self.get_logger().error("파지 실패")
             self.go_home()
             return False
@@ -1625,10 +1629,23 @@ class BlockSort(Node):
     def rise(self, target_z, why=""):
         """지금 자리에서 **수직으로만** 올린다. xy 는 건드리지 않는다.
 
+        돌려주는 것 — 부르는 쪽이 '끝까지 올라갔는지' 를 알아야 한다:
+            True       target_z 에 도달했다(또는 이미 그만큼 높았다)
+            "capped"   못 올라가 LIFT_FALLBACK 만큼만 올렸다
+            False      전혀 못 올렸다
+
         target_z 가 안 되면 **지금 높이 + LIFT_FALLBACK 만큼만** 올려 본다.
         판 바깥쪽에서는 250mm 까지 뻗는 자세에 IK 해가 없어 컨트롤러가 조용히
         거부하는데(실측 2026-08-08), 거기서 포기하면 물린 채로 판을 대각선으로
         지나가 다른 블록을 친다. 조금이라도 올리면 그만큼 안전해진다.
+
+        **물러나기는 한 자리에서 한 번뿐이다.** 이 함수는 한 번 집어 옮기는 동안
+        두 번 불린다(pick 의 "파지 후", place_at 의 "옮기기 전"). 두 번째는 첫
+        번째가 씹혔을 때를 위한 안전장치라 보통 아무 일도 안 하는데, 물러나기가
+        **지금 높이 기준 +50** 이라 첫 번째가 물러섰으면 두 번째가 50 을 또
+        얹었다 — 같은 자리에서 50mm 상승이 두 번 나오는 원인이다(-13 → 37 → 87).
+        올라갈 수 없다는 사실은 첫 번째에서 이미 확인됐으므로, 같은 자리·같은
+        목표면 두 번째는 그대로 통과시킨다.
 
         이미 충분히 높으면 아무것도 하지 않고 True.
         """
@@ -1644,17 +1661,29 @@ class BlockSort(Node):
         if movel(full):
             self.get_logger().info(
                 f"{tag}수직 상승 {cur[2]:.0f} → {target_z:.0f}mm")
+            self._lift_capped = None          # 올라갔으니 기록을 지운다
             return True
-        # 물러나기 — 지금 높이에서 조금만.
+        # 같은 자리에서 같은 목표로 이미 물러섰으면 또 얹지 않는다.
+        cap = getattr(self, "_lift_capped", None)
+        if (cap is not None and cap[2] == target_z
+                and abs(cap[0] - cur[0]) <= MOVE_TOL
+                and abs(cap[1] - cur[1]) <= MOVE_TOL):
+            self.get_logger().info(
+                f"{tag}{target_z:.0f}mm 는 이 자리에서 이미 안 되는 것을 확인했습니다 "
+                f"— {cur[2]:.0f}mm 그대로 둡니다 (한 번만 올린다)")
+            return "capped"
+        # 물러나기 — 지금 높이에서 조금만. 이 자리에서 한 번뿐이다.
         low = list(cur); low[2] = cur[2] + LIFT_FALLBACK
         if movel(low):
             self.get_logger().warn(
                 f"{tag}{target_z:.0f}mm 까지 못 올라가 {LIFT_FALLBACK:.0f}mm 만 "
                 f"올립니다 ({cur[2]:.0f} → {low[2]:.0f}mm)")
-            return True
+            self._lift_capped = (cur[0], cur[1], target_z)
+            return "capped"
         self.get_logger().error(
             f"{tag}수직 상승이 전혀 안 됩니다 ({cur[2]:.0f}mm 에 머무름) "
             "— 이대로 옮기면 판을 대각선으로 지나갑니다")
+        self._lift_capped = (cur[0], cur[1], target_z)
         return False
 
     def ready_gripper(self, why=""):
@@ -1698,7 +1727,13 @@ class BlockSort(Node):
         return np.array(OFFSET_BASE) + R @ np.array(OFFSET_TOOL)
 
     def neighbors_xy(self, target_xy, radius=None, self_r=None):
-        """지금 시야에서 target 주변에 있는 **다른** 블록들의 중심 (base xy).
+        """지금 시야에서 target 주변에 있는 **다른** 블록들. (x, y, 색, 기울기)
+
+        **기울기를 함께 내보낸다.** 예전에는 (x, y, 색) 만 주고 검출이 준
+        각도를 버렸는데, 그러면 기하(approach_gap)가 이웃을 축 정렬된 35mm
+        정사각으로만 봐서 판정이 최대 7.2mm 낙관적이 된다 — 실측 2026-08-10
+        에 그 탓으로 "틈 34mm, 충분" 판정 뒤 그리퍼가 옆 블록을 쳤다.
+        자세한 이유는 block_geom.nb_half 주석에 적어 두었다.
 
         색을 전부 물어본다. 팔이 멈춰 있으므로 검출 노드가 촬영 한 번을 6색이
         나눠 쓴다(프레임 캐시가 자세 기준이라 그렇다 — 실측 6색 2.07초).
@@ -1717,10 +1752,11 @@ class BlockSort(Node):
                 if d < self_r:
                     continue                  # 자기 자신 (블록은 이보다 붙을 수 없다)
                 if d <= radius:
-                    out.append((p[0], p[1], color))
+                    out.append((p[0], p[1], color, det["angle"]))
         return out
 
-    def aim_between_neighbors(self, pose, allow_relocate=True, _tries=0, _depth=0):
+    def aim_between_neighbors(self, pose, allow_relocate=True, _tries=0, _depth=0,
+                              color=None):
         """손가락이 내려갈 방향에 블록이 있으면 **손목을 90° 돌린다.**
 
         그리퍼는 한 축의 양쪽에서 손가락이 내려와 안쪽으로 닫힌다. 그 축에 다른
@@ -1739,6 +1775,14 @@ class BlockSort(Node):
         쓴다 — 그 이웃을 집으면서 또 다른 이웃을 옮기기 시작하면 판 전체가
         연쇄적으로 재배치될 수 있어, 한 단계로 막는다.
 
+        color 는 **지금 집으려는 목표의 색**이다. 이웃을 치운 뒤 목표를 다시
+        재는 데만 쓴다. 인스턴스 상태(self.last_target 같은 것)로 두면 안 된다 —
+        neighbors_xy() 가 아는 색을 전부 훑으며 _detect_all 을 부르므로, 그런
+        값은 이 지점에 오기까지 **목록의 마지막 색**으로 덮여 버린다. 그러면
+        엉뚱한 색을 목표 자리에서 찾게 되고, 하필 그 색이 근처에 있으면
+        **다른 블록의 좌표를 목표로 삼는다.** 그래서 인자로 꿴다.
+        없으면(None) 재측정을 건너뛰고 예전 좌표로 간다.
+
         판단은 block_geom.best_axis 가 한다(로봇 없이 시험된다 — test_avoid.py).
         여기서는 **좌표를 모아 주고, 고른 결과를 자세와 last_rot 에 반영**한다.
         last_rot 을 같이 돌려야 파지 보정(grasp_offset)이 함께 돌아간다 —
@@ -1751,13 +1795,15 @@ class BlockSort(Node):
         # 안 돌고 있는 것" 을 구별할 수 없다 — 실측 2026-08-07 에 그걸로 헤맸다.
         self.get_logger().info(
             f"옆 블록 살핌 (반경 {NEIGHBOR_R:.0f}mm): "
-            + (", ".join(f"{c}({x:.0f},{y:.0f})" for x, y, c in nb) if nb else "없음"))
+            + (", ".join(f"{c}({x:.0f},{y:.0f},{a:.0f}°)" for x, y, c, a in nb)
+               if nb else "없음"))
         if not nb:
             return pose
         axis = tool_yaw(pose[3:])          # 손가락이 닫히는 축의 base 방위
-        turn, gap, gap0 = best_axis((pose[0], pose[1]), axis,
-                                    [(x, y) for x, y, _c in nb])
-        near = ", ".join(f"{c}({x:.0f},{y:.0f})" for x, y, c in nb)
+        # **각도를 함께 넘긴다.** 돌아간 이웃은 축 방향으로 더 내민다(nb_half).
+        nb_geo = [(x, y, a) for x, y, _c, a in nb]
+        turn, gap, gap0 = best_axis((pose[0], pose[1]), axis, nb_geo)
+        near = ", ".join(f"{c}({x:.0f},{y:.0f},{a:.0f}°)" for x, y, c, a in nb)
 
         def mm(v):   # noqa: E306
             """무한(방해 없음)을 '충분' 으로 읽히게. 'infmm' 은 로그에서 읽기 어렵다."""
@@ -1767,13 +1813,18 @@ class BlockSort(Node):
         # 치우려 하지" 를 로그로 따라갈 수 없다(실측 2026-08-07 에 그걸로 헤맸다).
         used = axis + turn
         lane = []
-        for x, y, c in nb:
+        for x, y, c, a in nb:
             al, sd = lane_offsets((pose[0], pose[1]), (x, y), used)
-            if abs(sd) < LANE_HALF:
-                lane.append((c, round(abs(al) - BLOCK_MM)))
+            if abs(sd) < nb_lane((x, y, a), used):
+                # 기울기를 반영한 실제 틈과, 축 정렬로만 봤을 때의 값을 같이
+                # 남긴다 — 둘이 벌어지는 만큼이 예전 판정이 낙관적이던 양이다.
+                lane.append((c, round(abs(al) - BLOCK_MM / 2.0
+                                      - nb_half((x, y, a), used)),
+                             round(abs(al) - BLOCK_MM)))
         self.get_logger().info(
             f"파지축 {used % 180:.0f}° — 이 축에서 막는 것: "
-            + (", ".join(f"{c} 틈{g}mm" for c, g in lane) if lane else "없음"))
+            + (", ".join(f"{c} 틈{g}mm" + (f"(축정렬로 보면 {g0})" if g != g0 else "")
+                         for c, g, g0 in lane) if lane else "없음"))
         if turn:
             # 손목이 덜 돌아가는 쪽으로 접는다 — 판단은 block_geom.fold_turn 이
             # 한다(로봇 없이 시험된다). ±90 이 같은 물림인 이유도 거기 적어 두었다.
@@ -1802,7 +1853,7 @@ class BlockSort(Node):
                 # grasp_offset() 이 엉뚱한 방향으로 보정된다.
                 saved_last_rot = self.last_rot
                 moved = self.relocate_blocker((pose[0], pose[1]), axis + turn, nb,
-                                              depth=_depth)
+                                              depth=_depth, target_deg=axis)
                 if not moved:
                     # **이 축이 안 되면 반대 축의 방해물을 치워 본다.**
                     # best_axis 는 '틈이 넓은 축' 을 고르지만, 그 축의 방해물이
@@ -1818,7 +1869,7 @@ class BlockSort(Node):
                         f"직각 축 {(axis + turn + 90) % 180:.0f}° 의 방해물을 치워 봅니다")
                     moved = self.relocate_blocker((pose[0], pose[1]),
                                                   axis + turn + 90.0, nb,
-                                                  depth=_depth)
+                                                  depth=_depth, target_deg=axis)
                 self.last_rot = saved_last_rot
                 if moved:
                     # **목표 위로 돌아가서 다시 본다.** 치우고 나면 팔이 치운 자리
@@ -1829,8 +1880,32 @@ class BlockSort(Node):
                     if not self.hover_over((pose[0], pose[1])):
                         self.get_logger().warn("목표 위로 돌아가지 못해 재판단을 건너뜁니다")
                         return None
+                    # **목표 자신도 다시 잰다.** 이웃을 집어 옮기는 동안 목표가
+                    # 밀리는 일이 있다 — 그리퍼가 스치거나, 끌려가는 블록에
+                    # 부딪히거나, 놓을 때 튕긴다. 예전에는 이웃만 다시 보고
+                    # 목표는 치우기 전 좌표를 그대로 썼다. 그러면 몇 mm 밀린
+                    # 자리를 집으려다 모서리를 물거나 빈손이 된다.
+                    #
+                    # 못 찾으면(가려짐, 검출 실패) 예전 좌표로 그대로 간다 —
+                    # 여기서 접으면 애써 치운 것이 헛수고가 된다.
+                    if color:
+                        fresh = self.detect(color, near=(pose[0], pose[1]),
+                                            max_dist=CACHE_TOLERANCE)
+                        if fresh is None:
+                            self.get_logger().warn(
+                                f"치운 뒤 {color} 를 다시 못 찾았습니다 — "
+                                "치우기 전 좌표로 갑니다")
+                        else:
+                            d = float(np.hypot(fresh[0] - pose[0],
+                                               fresh[1] - pose[1]))
+                            if d >= 1.0:
+                                self.get_logger().info(
+                                    f"치우는 동안 {color} 가 {d:.1f}mm 밀렸습니다 "
+                                    f"({pose[0]:.0f},{pose[1]:.0f}) → "
+                                    f"({fresh[0]:.0f},{fresh[1]:.0f}) — 좌표 갱신")
+                            pose = list(fresh)
                     return self.aim_between_neighbors(pose, allow_relocate,
-                                                      _tries + 1, _depth)
+                                                      _tries + 1, _depth, color)
             # 여기까지 왔다는 것은 **로봇이 스스로 할 수 있는 것을 다 했다**는 뜻이다.
             # 사람에게 넘기기 전에 무엇을 시도했는지 남긴다 — 그냥 "치우고 다시
             # 명령하세요" 만 뜨면 로봇이 아무것도 안 해본 것처럼 보인다.
@@ -1897,7 +1972,7 @@ class BlockSort(Node):
         나서고, 없다고 봤는데 되면 그냥 집힌다.
         """
         pend = self.copy_pending or []
-        all_pts = [(d["pose"][0], d["pose"][1])
+        all_pts = [(d["pose"][0], d["pose"][1], d["angle"])
                    for lst in stock.values() for d in lst]
         # 두 바퀴 돈다. **첫 바퀴는 팔이 닿는 것만** 본다 — 틈이 넓어도 판
         # 바깥이면 못 집는다(in_reach 주석의 실측). 안쪽에 할 게 하나도 없을
@@ -1939,7 +2014,7 @@ class BlockSort(Node):
         """
         if len(dets) < 2:
             return list(dets)
-        all_pts = [(d["pose"][0], d["pose"][1])
+        all_pts = [(d["pose"][0], d["pose"][1], d["angle"])
                    for lst in stock.values() for d in lst]
         by_xy = {(round(d["pose"][0], 1), round(d["pose"][1], 1)): d for d in dets}
         pts = [(d["pose"][0], d["pose"][1], tool_yaw(d["pose"][3:])) for d in dets]
@@ -2010,7 +2085,8 @@ class BlockSort(Node):
             return False
         # allow_relocate=False — 이 블록 자신의 이웃까지 옮기기 시작하면 연쇄가
         # 끝없이 번진다(임시 치우기와 같은 이유로 한 단계에서 멈춘다).
-        if not self.pick(pose, allow_relocate=allow_chain, _depth=depth + 1):
+        if not self.pick(pose, allow_relocate=allow_chain, _depth=depth + 1,
+                         color=color):
             self.get_logger().error(f"{color} 를 집지 못했습니다")
             return False
         self.place(dst, angle=ang)
@@ -2021,7 +2097,8 @@ class BlockSort(Node):
             f"완료: 인간{hz_i}번의 {color} → 로봇 {dst}번  (막는 것을 치우며 함께 끝냄)")
         return True
 
-    def relocate_blocker(self, target_xy, axis_deg, neighbors, depth=0):
+    def relocate_blocker(self, target_xy, axis_deg, neighbors, depth=0,
+                         target_deg=None):
         """axis_deg 축을 막고 있는 이웃 블록 하나를 옆으로 옮겨 자리를 만든다.
 
         1. 어느 이웃이 막는지 block_geom.blocking_neighbor 로 찾는다 — 판정
@@ -2054,8 +2131,8 @@ class BlockSort(Node):
         # 치워야 한다. 한 번에 하나씩 치우고, 목표 위로 돌아가 다시 보는 것을
         # RELOCATE_MAX_TRIES 만큼 되풀이한다 — 앞서 치운 것은 그 재검출에
         # 반영된다(치운 블록은 이미 그 자리에 없다).
-        pts = [(x, y) for x, y, _c in neighbors]
-        cand = axis_blockers(target_xy, axis_deg, pts)
+        pts = [(x, y, a) for x, y, _c, a in neighbors]
+        cand = axis_blockers(target_xy, axis_deg, pts, target_deg=target_deg)
         if not cand:
             return False                   # 이 축을 막는 게 아예 없다
 
@@ -2115,7 +2192,7 @@ class BlockSort(Node):
                                     if hard else ""))
         for k, (bxy, room) in enumerate(easy + hard, start=1):
             chained = k > len(easy)
-            color = next((c for x, y, c in neighbors
+            color = next((c for x, y, c, _a in neighbors
                           if np.hypot(x - bxy[0], y - bxy[1]) < 1.0), None)
             if color is None:
                 continue
@@ -2187,7 +2264,7 @@ class BlockSort(Node):
         # 안전을 더해 주지 않고 멀쩡한 길만 없앤다.
         nb = self.neighbors_xy(bxy, radius=SLIDE_MM + BLOCK_MM * 2)
         dests = slide_dests(target_xy, bxy, axis_deg,
-                            others=[(x, y) for x, y, _c in nb],
+                            others=[(x, y, a) for x, y, _c, a in nb],
                             clear_extra=SLIDE_CLEAR_EXTRA,
                             check_path=SLIDE_CHECK_PATH)
         # 끌고 간 자리도 팔이 닿아야 한다 — 못 가면 끌다 말고 멈춘다.
@@ -2212,7 +2289,7 @@ class BlockSort(Node):
             return False
         # lift=False — 잡은 자리에 그대로 머문다. 여기서 올라가 버리면 끌기가 아니다.
         if not self.pick(pose, allow_relocate=allow_chain, _depth=depth + 1,
-                         lift=False):
+                         lift=False, color=color):
             self.get_logger().error(f"{color} 를 집지 못했습니다")
             return False
         # **지금 자세에서 xy 만 옮긴다.** 파지 보정이 이미 반영된 실제 TCP 에서
@@ -2316,7 +2393,8 @@ class BlockSort(Node):
         if pose is None:
             self.get_logger().error(f"치울 {color} 를 다시 못 찾았습니다")
             return False
-        if not self.pick(pose, allow_relocate=allow_chain, _depth=depth + 1):
+        if not self.pick(pose, allow_relocate=allow_chain, _depth=depth + 1,
+                         color=color):
             self.get_logger().error(f"{color} 를 집지 못했습니다")
             return False
         dest_pose = list(pose)
@@ -2324,7 +2402,7 @@ class BlockSort(Node):
         self.place_at(dest_pose, taught=False)
         return True
 
-    def pick(self, pose, allow_relocate=True, _depth=0, lift=True):
+    def pick(self, pose, allow_relocate=True, _depth=0, lift=True, color=None):
         """접근 → 하강 → 파지 → 확인. 성공하면 True.
 
         allow_relocate=False 는 relocate_blocker 가 치울 이웃 자신을 집을 때
@@ -2333,17 +2411,24 @@ class BlockSort(Node):
         lift=False 는 **잡은 자리에 그대로 머문다**(끌기용). 들어 올리지 않으므로
         부르는 쪽이 곧바로 수평 이동해 블록을 끌 수 있다 — 상승·하강 두 번이
         통째로 빠진다. 끌기가 끝나면 부르는 쪽이 직접 올라와야 한다.
+
+        color 는 **이 pose 가 무슨 색인지**다. 이웃을 치운 뒤 목표를 다시 재는
+        데만 쓰이고(aim_between_neighbors 주석 참고), 파지 자체는 색을 모른다.
+        부르는 쪽은 바로 앞에서 detect(색) 을 했으므로 언제나 알고 있다.
         """
         if _depth == 0:
             # 새 목표를 집기 시작한다 — 지난 목표에서 실패한 blocker 기록을 비운다.
             # (연쇄로 들어온 호출은 _depth>0 이라 기록을 이어받는다)
             self._failed_blockers = set()
+            # 상승 물러남 기록도 새 목표에서 다시 본다. 판이 바뀌었을 수도 있고,
+            # 무엇보다 '한 번만 올린다' 는 **한 번 집어 옮기는 동안** 의 이야기다.
+            self._lift_capped = None
         pose = list(pose)
         # 손목 방향을 먼저 정한다 — 파지 보정이 손목 각도에 딸려 있어서,
         # 보정을 더한 뒤에 돌리면 보정이 틀린 방향으로 남는다.
         # None 이면 옆 블록에 막혀 내려갈 자리가 없다는 뜻이다.
         pose = self.aim_between_neighbors(pose, allow_relocate=allow_relocate,
-                                          _depth=_depth)
+                                          _depth=_depth, color=color)
         if pose is None:
             return False
         g = self.grasp_offset()
@@ -2442,9 +2527,25 @@ class BlockSort(Node):
         # 목적지 위 z=250 으로 가면서 **상승과 xy 이동을 동시에** 하게 되어,
         # 판을 대각선으로 훑는 바로 그 경로가 된다.
         # 지금 자리에서 z 만 올리는 것이라 이미 높으면 movel 이 즉시 통과한다.
-        self.rise(up[2], "옮기기 전")
-
-        movel(up)                        # 목적지 위로 (수평 이동)
+        if self.rise(up[2], "옮기기 전") is True:
+            movel(up)                    # 목적지 위로 (z=250 유지한 수평 이동)
+        else:
+            # **끝까지 못 올라갔다.** 여기서 곧장 movel(up) 을 넣으면 목적지 위
+            # z=250 으로 가면서 상승과 xy 이동을 **동시에** 하게 되어, 이 함수가
+            # 막으려던 바로 그 대각선 경로가 된다 — rise 가 물러섰을 때도 True 를
+            # 돌려주던 탓에 그 경로가 실제로 열려 있었다.
+            # 지금 높이 그대로 수평만 옮기고 곧바로 내린다. 낮게 지나가지만
+            # 대각선은 아니고, 높이가 도중에 변하지 않아 경로가 예측 가능하다.
+            try:
+                flat = list(up); flat[2] = float(get_current_posx()[0][2])
+            except Exception as e:
+                self.get_logger().error(
+                    f"현재 높이를 못 읽어 그대로 목적지 위로 갑니다({e})")
+                flat = list(up)
+            self.get_logger().warn(
+                f"{up[2]:.0f}mm 에 못 올라가 {flat[2]:.0f}mm 로 수평 이동합니다 "
+                "— 상승과 xy 를 동시에 하지 않습니다")
+            movel(flat)
         movel(p)                         # 순수 z 하강
         gripper.open_gripper(); wait_gripper()
         movel(up)
@@ -2507,7 +2608,7 @@ class BlockSort(Node):
             p = self.detect(target)
             if p is None:
                 self.get_logger().error("검출 실패 — 중단"); break
-            if not self.pick(p):
+            if not self.pick(p, color=target):
                 self.get_logger().error("파지 실패 — 중단"); break
             # pick 이 끝나면 파지 지점 바로 위에 떠 있다. 그 자리에서 든 블록을 본다.
             got = self._detect_raw(target)
@@ -2549,7 +2650,7 @@ class BlockSort(Node):
             p = self.detect(target)
             if p is None:
                 self.get_logger().error("검출 실패 — 중단"); break
-            if not self.pick(rotate_tool(p, deg - GRASP_ROT)):
+            if not self.pick(rotate_tool(p, deg - GRASP_ROT), color=target):
                 self.get_logger().error("파지 실패 — 중단"); break
             self.place_at(rotate_tool(p, deg - GRASP_ROT))
             self.go_home()
@@ -2713,7 +2814,7 @@ class BlockSort(Node):
                 p = self.detect(target)
                 if p is None:
                     print(f"  {z}번  검출 실패 — 건너뜀"); continue
-                if not self.pick(p):
+                if not self.pick(p, color=target):
                     print(f"  {z}번  파지 실패 — 건너뜀"); continue
                 cmd = list(self.cfg["zones"][z])
                 self.place(z)
@@ -2750,7 +2851,7 @@ class BlockSort(Node):
             if p1 is None:
                 self.get_logger().error("검출 실패 — 중단")
                 break
-            if not self.pick(p1):
+            if not self.pick(p1, color=target):
                 self.get_logger().error("파지 실패 — 중단")
                 break
             self.place_at(p1)
@@ -2862,7 +2963,7 @@ class BlockSort(Node):
                     f"{target}번 구역에서 {color} 를 다시 못 찾았습니다.")
                 return False
             self.get_logger().info(f"파지 목표 {[round(v, 1) for v in pose[:3]]}")
-            if not self.pick(pose):
+            if not self.pick(pose, color=color):
                 self.get_logger().error("파지 실패 — 중단")
                 self.go_home()
                 return False

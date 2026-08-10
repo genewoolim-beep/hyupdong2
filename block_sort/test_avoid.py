@@ -92,4 +92,39 @@ for lr in range(-180, 181, 5):
     assert abs(lr + fold_turn(float(lr), 90.0)) <= abs(lr + 90.0) + 1e-9, lr
 print("7 회피 회전을 손목이 덜 도는 쪽으로 접는다 (131°+90=221° → 131°-90=41°)")
 
+# ── 8. 이웃의 기울기를 봐야 한다 — 돌아간 정사각은 더 내민다 ──
+#     실측 2026-08-10 (로그 python3_12362): 목표 노란색(547.4,-73.8) 기울기 53°,
+#     파지축 127°. 주황색(503,-21) 의 틈을 **34mm** 로 보고 "충분(≥27)" 판정해
+#     그대로 내려갔는데 그리퍼가 그 주황색에 부딪혔다 — 컨트롤러가 보호정지해
+#     "20.0초 동안 STANDBY 가 안 됐습니다" → "이동 명령이 거부됐습니다" 로 끝났다.
+#     주황색이 돌아 있었던 것이다. 정사각은 φ 만큼 돌면 그 방향 폭이
+#     35(|cosφ|+|sinφ|) 로 커진다 — 반폭으로 17.5 → 최대 24.7mm.
+from block_geom import approach_gap, nb_half, nb_lane, FINGER_T  # noqa: E402
+
+TGT, AXIS, ORANGE = (547.4, -73.8), 127.0, (503.0, -21.0)
+
+# 각도를 안 넘기면 예전 그대로다 — 기존 호출부의 동작이 안 바뀐다.
+flat = approach_gap(TGT, AXIS, [ORANGE])
+assert abs(flat - 33.9) < 0.2, f"축 정렬 가정이면 {flat:.1f}mm (그때 로그의 34mm)"
+assert flat >= FINGER_T, "그래서 '충분' 으로 통과했다"
+
+# 기울기를 넘기면 그만큼 줄어든다. 45° 에서 최대 7.2mm.
+worst = approach_gap(TGT, AXIS, [ORANGE + (AXIS + 45.0,)])
+assert abs((flat - worst) - 7.2) < 0.1, f"45° 이웃이면 {flat - worst:.1f}mm 줄어야"
+assert worst < FINGER_T, f"{worst:.1f}mm — 손가락({FINGER_T})이 안 들어간다. 이제 걸러진다"
+
+# 기울기가 커질수록 단조롭게 좁아진다.
+gaps = [approach_gap(TGT, AXIS, [ORANGE + (AXIS + d,)]) for d in (0, 10, 20, 30, 45)]
+assert all(a >= b - 1e-9 for a, b in zip(gaps, gaps[1:])), gaps
+assert abs(gaps[0] - flat) < 1e-9, "축과 나란한 이웃은 예전 값과 같아야 한다"
+
+# 90° 대칭 — 정사각이므로 φ 와 φ+90 은 같은 폭이다.
+for d in (0.0, 17.0, 33.0, 45.0):
+    assert abs(nb_half((0, 0, d), 0.0) - nb_half((0, 0, d + 90.0), 0.0)) < 1e-9, d
+
+# 레인 판정도 같이 넓어진다 — 돌아간 블록은 옆으로도 더 내민다.
+assert nb_lane((0, 0, 45.0), 0.0) > nb_lane((0, 0, 0.0), 0.0)
+assert abs(nb_lane((0, 0), 0.0) - 29.5) < 1e-9, "모르면 예전 값(29.5)"
+print("8 이웃 기울기를 반영한다 — 그때 그 배치에서 34mm → 26.8mm 로 걸러진다")
+
 print("\n전부 통과 — 실기에서는 손목이 90° 돌아 물리는지, 보정이 함께 돌아가는지 본다")

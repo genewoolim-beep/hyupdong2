@@ -68,7 +68,63 @@ BLOCK_MM = 35.0          # 블록 한 변
 FINGER_T = 27.0
 # 손가락 패드가 축과 나란히 덮는 폭의 절반. 이보다 옆으로 비켜 있는 블록은
 # 손가락이 지나가도 안 닿는다.
-LANE_HALF = 29.5         # 블록 절반(17.5) + 패드 절반 길이(12)
+LANE_PAD = 12.0          # 패드 절반 길이
+LANE_HALF = BLOCK_MM / 2.0 + LANE_PAD    # 29.5 — 이웃 기울기를 모를 때의 값
+
+
+def nb_half(nb, axis_deg, block_mm=BLOCK_MM):
+    """이웃이 axis_deg 방향으로 내미는 **반폭**(mm).
+
+    **정사각형은 돌아가면 그 방향 폭이 커진다.** 한 변 s 인 정사각이 φ 만큼
+    돌면 어느 방향으로 내미는 폭은 s(|cosφ| + |sinφ|) 다 — 45° 에서 s√2 로
+    최대가 된다. 반폭으로는 17.5 → 24.7mm, **7.2mm** 차이다.
+
+    이걸 안 보면 판정이 그만큼 **낙관적**이 된다. 실측 2026-08-10 (로그
+    python3_12362): 목표 노란색(547,-74) 파지축 127° 에서 주황색(503,-21) 의
+    틈을 34mm 로 보고 "충분(≥27)" 판정해 그대로 내려갔는데, 그리퍼가 그
+    주황색에 부딪혀 컨트롤러가 보호정지했다(STANDBY 20초 대기 실패 → 이동
+    거부). 주황색이 30~45° 돌아 있었다면 실제 틈은 27mm 이하다.
+    같은 로그에서 집힌 기울기가 12·14·15·16·20·23·24·53·88·89° 였다 —
+    이 판의 블록은 축과 나란하지 않다.
+
+    **목표 자신은 이 보정이 필요 없다.** 손목을 블록 면에 맞춰 내려가므로
+    (ALIGN_TO_BLOCK) 목표는 축 방향으로 정확히 반폭 17.5mm 를 내민다.
+    보정이 필요한 것은 **이웃뿐**이다.
+
+    nb 는 (x, y) 또는 (x, y, 기울기deg). 기울기가 없으면 축 정렬로 본다 —
+    예전과 같은 값이라 각도를 안 넘기던 호출부는 동작이 안 바뀐다.
+    각도를 아는 쪽(block_sort.neighbors_xy)이 넘기면 그때부터 정확해진다.
+    """
+    import numpy as np
+    if len(nb) < 3 or nb[2] is None:
+        return block_mm / 2.0
+    r = np.radians(float(nb[2]) - float(axis_deg))
+    return block_mm / 2.0 * (abs(np.cos(r)) + abs(np.sin(r)))
+
+
+def _pt(n):
+    """이웃 하나를 (x, y) 또는 (x, y, 기울기deg) 로 정규화한다.
+
+    부르는 쪽이 (x, y, 색) 처럼 세 번째에 다른 것을 담아 오는 일이 없도록
+    **각도만** 통과시킨다. 각도가 None 이면 두 값짜리로 줄인다.
+    돌려주는 것이 늘 2 또는 3 튜플이라 nb_half/nb_lane 이 그대로 읽는다.
+    """
+    if len(n) > 2 and n[2] is not None:
+        return (float(n[0]), float(n[1]), float(n[2]))
+    return (float(n[0]), float(n[1]))
+
+
+def nb_lane(nb, axis_deg, lane_half=LANE_HALF, block_mm=BLOCK_MM,
+            lane_pad=LANE_PAD):
+    """이 이웃에게 적용할 레인 반폭(mm). 축의 **직각** 방향 반폭 + 패드 절반.
+
+    레인 판정도 같은 이유로 기울기를 봐야 한다 — 돌아간 블록은 옆으로도 더
+    내밀어서, 축 정렬로 재면 '비켜 있다' 고 잘못 넘긴다.
+    기울기를 모르면 예전 값(lane_half)을 그대로 쓴다.
+    """
+    if len(nb) < 3 or nb[2] is None:
+        return lane_half
+    return nb_half(nb, axis_deg + 90.0, block_mm=block_mm) + lane_pad
 
 
 def approach_gap(target_xy, axis_deg, neighbors, block_mm=BLOCK_MM,
@@ -77,9 +133,14 @@ def approach_gap(target_xy, axis_deg, neighbors, block_mm=BLOCK_MM,
 
     축 방향으로 재고, 축에서 옆으로 lane_half 넘게 비킨 블록은 무시한다 —
     손가락이 그 옆을 지나가므로 닿지 않는다.
-    틈은 두 블록 **표면 사이** 거리다(중심거리 - 한 변). 그 틈에 들어가는 것은
-    **손가락 하나**이므로 FINGER_T(한 개 두께)와 견준다 — 반대쪽 손가락은
-    반대쪽 틈으로 내려간다. 양쪽을 함께 보는 것은 아래 min 이다.
+    틈은 두 블록 **표면 사이** 거리다(중심거리 - 목표 반폭 - 이웃 반폭).
+    그 틈에 들어가는 것은 **손가락 하나**이므로 FINGER_T(한 개 두께)와
+    견준다 — 반대쪽 손가락은 반대쪽 틈으로 내려간다. 양쪽을 함께 보는 것은
+    아래 min 이다.
+
+    이웃이 (x, y, 기울기deg) 면 **그 기울기로 반폭을 계산한다**(nb_half).
+    돌아간 정사각은 축 방향으로 더 내밀기 때문이다 — 최대 7.2mm. 기울기를
+    안 넘기면 예전처럼 축 정렬(반폭 17.5)로 본다.
     """
     import numpy as np
     r = np.radians(float(axis_deg))
@@ -88,9 +149,12 @@ def approach_gap(target_xy, axis_deg, neighbors, block_mm=BLOCK_MM,
     best = float("inf")
     for nb in neighbors:
         d = np.array([float(nb[0]) - target_xy[0], float(nb[1]) - target_xy[1]])
-        if abs(float(perp @ d)) >= lane_half:
+        if abs(float(perp @ d)) >= nb_lane(nb, axis_deg, lane_half=lane_half,
+                                           block_mm=block_mm):
             continue                               # 옆으로 비켜 있다
-        gap = abs(float(ax @ d)) - block_mm         # 표면 사이 거리
+        # 목표는 손목을 제 면에 맞췄으므로 반폭이 정확히 block_mm/2 다.
+        gap = (abs(float(ax @ d)) - block_mm / 2.0
+               - nb_half(nb, axis_deg, block_mm=block_mm))
         best = min(best, gap)
     return best
 
@@ -162,9 +226,11 @@ def blocking_neighbor(target_xy, axis_deg, neighbors, block_mm=BLOCK_MM,
     best_gap, best_xy = float("inf"), None
     for nb in neighbors:
         d = np.array([float(nb[0]) - target_xy[0], float(nb[1]) - target_xy[1]])
-        if abs(float(perp @ d)) >= lane_half:
+        if abs(float(perp @ d)) >= nb_lane(nb, axis_deg, lane_half=lane_half,
+                                           block_mm=block_mm):
             continue                               # 옆으로 비켜 있다 — 방해 아님
-        gap = abs(float(ax @ d)) - block_mm
+        gap = (abs(float(ax @ d)) - block_mm / 2.0
+               - nb_half(nb, axis_deg, block_mm=block_mm))
         if gap < best_gap:
             best_gap, best_xy = gap, (float(nb[0]), float(nb[1]))
     return best_xy
@@ -207,16 +273,19 @@ def _blocking_color(color, xy, axis_deg, all_pts, finger_t=FINGER_T):
     포함). 자기 자신(좌표가 거의 같은 같은 색 항목)은 제외하고 본다.
     안 막혀 있거나 막는 이웃의 색을 모르면 None.
     """
-    others = [(x, y) for x, y, c in all_pts
-             if not (c == color and abs(x - xy[0]) < 1.0 and abs(y - xy[1]) < 1.0)]
+    # all_pts 는 (x, y, 색) 또는 (x, y, 색, 기울기). 기울기가 있으면 기하로 넘긴다
+    # — 세 번째가 색이라 _pt 가 그대로 읽을 수 없어 여기서 자리를 바꾼다.
+    others = [_pt((p[0], p[1], p[3] if len(p) > 3 else None)) for p in all_pts
+              if not (p[2] == color and abs(p[0] - xy[0]) < 1.0
+                      and abs(p[1] - xy[1]) < 1.0)]
     turn, gap, _gap0 = best_axis(xy, axis_deg, others, finger_t=finger_t)
     if gap >= finger_t:
         return None                                # 안 막혔다
     bxy = blocking_neighbor(xy, axis_deg + turn, others)
     if bxy is None:
         return None
-    return next((c for x, y, c in all_pts
-                if abs(x - bxy[0]) < 1.0 and abs(y - bxy[1]) < 1.0), None)
+    return next((p[2] for p in all_pts
+                if abs(p[0] - bxy[0]) < 1.0 and abs(p[1] - bxy[1]) < 1.0), None)
 
 
 def pick_order(pts, all_pts, finger_t=FINGER_T, self_r=30.0):
@@ -251,8 +320,8 @@ def pick_order(pts, all_pts, finger_t=FINGER_T, self_r=30.0):
     def gap_of(p):
         x, y = p[0], p[1]
         axis = p[2] if len(p) > 2 else 0.0
-        others = [(ox, oy) for ox, oy in all_pts
-                  if np.hypot(ox - x, oy - y) >= self_r]
+        others = [_pt(o) for o in all_pts
+                  if np.hypot(o[0] - x, o[1] - y) >= self_r]
         _turn, gap, _g0 = best_axis((x, y), axis, others, finger_t=finger_t)
         return gap
 
@@ -267,7 +336,9 @@ def reorder_for_conflicts(plan, positions, finger_t=FINGER_T):
 
     plan       [(hz_i, dst, color, angle_deg), ...] — copy_human()의 계획.
                색이 세 번째, 손목 각도(축 방향 판단 기준)가 네 번째 자리다.
-    positions  {색: [(x, y), ...]} — patrol()로 이미 모아 둔 프리구역 좌표.
+    positions  {색: [(x, y), ...]} 또는 {색: [(x, y, 기울기), ...]} —
+               patrol()로 이미 모아 둔 프리구역 좌표. 기울기가 있으면 막힘
+               판정이 그만큼 정확해진다(nb_half 참고).
                plan에 없는 색이 섞여 있어도 된다(막는 쪽 판정에만 쓰인다 —
                plan에 없는 색은 순서를 조정할 대상이 아니므로 자연히 걸러진다).
 
@@ -280,7 +351,9 @@ def reorder_for_conflicts(plan, positions, finger_t=FINGER_T):
     유지한다(무리하게 순서를 만들지 않는다. relocate_blocker 의 임시 대피가
     그런 경우의 안전망으로 남아 있다).
     """
-    all_pts = [(x, y, c) for c, pts in positions.items() for x, y in pts]
+    # (x, y, 색, 기울기) — _blocking_color 가 세 번째를 색, 네 번째를 기울기로 읽는다.
+    all_pts = [(p[0], p[1], c, p[2] if len(p) > 2 else None)
+               for c, pts in positions.items() for p in pts]
     plan_colors = {t[2] for t in plan}
 
     deps = {}                          # color -> plan 안에서 그 색을 막는 색들
@@ -324,7 +397,8 @@ def reorder_for_conflicts(plan, positions, finger_t=FINGER_T):
     return [t for c in color_order for t in by_color[c]]
 
 
-def graspable_blocker(target_xy, axis_deg, neighbors, finger_t=FINGER_T, **kw):
+def graspable_blocker(target_xy, axis_deg, neighbors, finger_t=FINGER_T,
+                      target_deg=None, **kw):
     """막는 이웃 중 **그 자신을 집을 수 있는** 것을 고른다. 없으면 None.
 
     이것이 없으면 이웃 치우기가 자기 발에 걸린다. 이웃을 치우려면 먼저 그 이웃을
@@ -341,7 +415,8 @@ def graspable_blocker(target_xy, axis_deg, neighbors, finger_t=FINGER_T, **kw):
     아무도 못 집으면 None 이고, 그때는 사람이 손으로 치워야 한다(연쇄로 파고들지
     않는다 — 끝없이 번질 수 있다).
     """
-    pts = [(float(n[0]), float(n[1])) for n in neighbors]
+    pts = [_pt(n) for n in neighbors]
+    tgt = _pt((target_xy[0], target_xy[1], target_deg))
     best, best_xy = -float("inf"), None
     for i, b in enumerate(pts):
         # ① 이 이웃이 **이 축에서** 막고 있는가.
@@ -355,11 +430,12 @@ def graspable_blocker(target_xy, axis_deg, neighbors, finger_t=FINGER_T, **kw):
         if approach_gap(target_xy, axis_deg, [b], **kw) >= finger_t:
             continue
         # ② 그 이웃 자신을 집을 수 있는가 (원래 목표도 이웃으로 넣는다)
-        others = [p for j, p in enumerate(pts) if j != i] + [tuple(target_xy)]
+        others = [p for j, p in enumerate(pts) if j != i] + [tgt]
         room = max(approach_gap(b, axis_deg, others, **kw),
                    approach_gap(b, axis_deg + 90.0, others, **kw))
         if room >= finger_t and room > best:
-            best, best_xy = room, b
+            # 자리만 돌려준다 — 부르는 쪽이 np.asarray 로 2차원 벡터를 만든다.
+            best, best_xy = room, (b[0], b[1])
     return best_xy
 
 
@@ -447,7 +523,8 @@ def slide_dests(target_xy, blocker_xy, axis_deg, others=(), dist=SLIDE_MM,
     return out
 
 
-def axis_blockers(target_xy, axis_deg, neighbors, finger_t=FINGER_T, **kw):
+def axis_blockers(target_xy, axis_deg, neighbors, finger_t=FINGER_T,
+                  target_deg=None, **kw):
     """이 축을 막는 이웃 **전부**를, 자기 자신이 집기 쉬운 순으로.
 
     돌려주는 것: [(xy, room, 집을수있나), ...] — room 이 큰 것부터.
@@ -458,15 +535,17 @@ def axis_blockers(target_xy, axis_deg, neighbors, finger_t=FINGER_T, **kw):
     골라 **그 블록의 방해물부터** 치우면 한 단계 더 파고들 수 있다.
     포기하기 전에 해볼 것을 다 해보기 위한 목록이다.
     """
-    pts = [(float(n[0]), float(n[1])) for n in neighbors]
+    pts = [_pt(n) for n in neighbors]
+    tgt = _pt((target_xy[0], target_xy[1], target_deg))
     out = []
     for i, b in enumerate(pts):
         if approach_gap(target_xy, axis_deg, [b], **kw) >= finger_t:
             continue                       # 이 축을 안 막는다 — 치워도 헛수고
-        others = [p for j, p in enumerate(pts) if j != i] + [tuple(target_xy)]
+        others = [p for j, p in enumerate(pts) if j != i] + [tgt]
         room = max(approach_gap(b, axis_deg, others, **kw),
                    approach_gap(b, axis_deg + 90.0, others, **kw))
-        out.append((b, room, room >= finger_t))
+        # 자리만 돌려준다(2튜플) — 부르는 쪽이 그대로 좌표로 쓴다.
+        out.append(((b[0], b[1]), room, room >= finger_t))
     out.sort(key=lambda t: -t[1])
     return out
 
