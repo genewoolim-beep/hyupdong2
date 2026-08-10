@@ -2532,7 +2532,7 @@ class BlockSort(Node):
         print(f"\n  유효 측정 {len(a)}/{len(errs)}회")
         print(f"  블록이 TCP 대비   x {m[0]:+.2f}  y {m[1]:+.2f}  mm 에 물림")
         print(f"  표준편차          x {s[0]:5.2f}  y {s[1]:5.2f}  mm")
-        print(f"\n  중앙을 물게 하려면")
+        print("\n  중앙을 물게 하려면")
         print(f"    (참고) 이 자세에서의 보정에 ({m[0]:+.1f}, {m[1]:+.1f}) 를 더하세요\n")
         return m
 
@@ -2636,10 +2636,10 @@ class BlockSort(Node):
                         dd = o0 - o9
                         t = np.array([(dd[0]-dd[1])/2, (dd[0]+dd[1])/2])
                         c = o0 - t
-                        print(f"\n  분리 완료")
+                        print("\n  분리 완료")
                         print(f"    c_base (각도 무관)  ({c[0]:+.2f}, {c[1]:+.2f})")
                         print(f"    t_tool (함께 회전)  ({t[0]:+.2f}, {t[1]:+.2f})")
-                        print(f"    → block_sort.py 에 아래를 넣으세요")
+                        print("    → block_sort.py 에 아래를 넣으세요")
                         print(f"      OFFSET_BASE = [{c[0]:.2f}, {c[1]:.2f}]")
                         print(f"      OFFSET_TOOL = [{t[0]:.2f}, {t[1]:.2f}]\n")
                     else:
@@ -2666,7 +2666,7 @@ class BlockSort(Node):
         movel(above, vel=VEL_L, acc=ACC_L); mwait()
         self.go_home()
 
-    def aim(self, target, hold=25.0):
+    def aim(self, target, hold=25.0, wrist=0.0):
         """그리퍼를 연 채로 파지 자세까지만 가서 멈춘다.
 
         간접 측정(집었다 놓고 다시 보기)은 손가락이 닫히는 축만 드러낸다.
@@ -2688,10 +2688,10 @@ class BlockSort(Node):
         movel(p, vel=VEL_L, acc=ACC_L); mwait()
         rot = GRASP_ROT + (((self.last_angle + 45.0) % 90.0) - 45.0
                            if ALIGN_TO_BLOCK else 0.0)
-        print(f"\n  파지 자세로 정지했습니다 (그리퍼 열림)")
+        print("\n  파지 자세로 정지했습니다 (그리퍼 열림)")
         print(f"    목표 (x, y) = ({p[0]:.1f}, {p[1]:.1f})   손목 {rot:+.0f}°")
-        print(f"    블록이 손가락 사이 중앙에 있습니까?")
-        print(f"    치우쳤다면 로봇 기준 어느 축으로 몇 mm 인지 보세요.")
+        print("    블록이 손가락 사이 중앙에 있습니까?")
+        print("    치우쳤다면 로봇 기준 어느 축으로 몇 mm 인지 보세요.")
         print(f"    {hold:.0f}초 뒤 물러납니다.\n")
         time.sleep(hold)
         movel(above, vel=VEL_L, acc=ACC_L); mwait()
@@ -2781,7 +2781,7 @@ class BlockSort(Node):
         print(f"\n  유효 측정 {len(a)}/{len(errs)}회")
         print(f"  평균 오차   x {m[0]:+.2f}  y {m[1]:+.2f}  mm")
         print(f"  표준편차    x {s[0]:5.2f}  y {s[1]:5.2f}  mm")
-        print(f"\n  block_sort.py 의 GRASP_OFFSET 을 이렇게 바꾸세요")
+        print("\n  block_sort.py 의 GRASP_OFFSET 을 이렇게 바꾸세요")
         print(f"    GRASP_OFFSET = [{-m[0]:.1f}, {-m[1]:.1f}]\n")
         return m
 
