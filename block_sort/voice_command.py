@@ -39,13 +39,11 @@
 `input_device_index`를 안 넘겨서 시스템 기본 입력 장치를 그냥 연다. 그래서
 카메라 인덱스처럼 장치를 잘못 잡는 문제 자체가 없다.
 """
-import io
 import os
 import re
 import sys
 import tempfile
 import time
-import wave
 from dataclasses import dataclass
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -467,7 +465,6 @@ def watch_gui(zones=(1, 2, 3, 4)):
             if is_exit_voice(text) or is_enter_voice(text):
                 set_status(f'들음: "{text}"', "모드 전환 문구로 인식됨 (여기선 전환 안 함)")
                 continue
-            glosses = normalize(text)
             r = command_ready_from_text(text, zones)
             if not r or not r[0]:
                 set_status(f'들음: "{text}"', "해석 실패 — 다시 말해주세요")
