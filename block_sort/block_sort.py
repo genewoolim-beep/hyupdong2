@@ -3133,8 +3133,40 @@ class BlockSort(Node):
 
         watch = {"stop": False}
         why = ["정상 종료"]      # 클로저에서 값을 바꿔야 해서 리스트로 감싼다
-        status = {"text": '🎤 "hello rokey" 라고 불러주세요', "sub": "", "level": 0.0}
+        status = {"text": f'🎤 "{vc.WAKE_PHRASE}" 라고 불러주세요', "sub": "", "level": 0.0}
         status_lock = threading.Lock()
+        # **로봇이 움직이는 동안 화면 루프를 쉬게 하는 깃발.**
+        #
+        # 이 모드만 오디오를 배경 스레드로 돌린다(인식이 몇 초씩 블로킹되는
+        # 동안 화면이 멎지 않게 하려는 것이다). 그런데 그 스레드가 로봇을
+        # 움직일 때 run_one() → detect() → rclpy.spin_until_future_complete()
+        # 로 **block_sort 노드를 spin** 하고, 같은 시각 화면 루프는 매 프레임
+        # rec._camera().read() 안에서 **sign_frames 노드를 spin** 한다
+        # (SIGN_SOURCE=ros 라 카메라가 ROS 토픽이다 — gesture_recognizer 참고).
+        #
+        # rclpy 의 wait set 은 스레드 안전하지 않다. 한쪽이 wait set 을 만드는
+        # 동안 다른 쪽이 건드리면 인덱스가 할당 크기를 넘는다:
+        #   실측 2026-08-10: '파란색 1번 구역' 을 알아듣고 실행에 들어간 뒤
+        #   survey_zones() 의 [구역확인 2/5] 에서 "wait set index too big" 로
+        #   음성모드가 통째로 죽고 작업모드로 튕겼다.
+        #
+        # 수어 모드는 한 스레드에서 인식→실행을 순서대로 하므로 이 문제가
+        # 없다. 여기서도 **겹치는 구간만 없애면** 된다 — 로봇이 움직이는 동안
+        # 화면은 멎지만 어차피 볼 것이 없고, 상태 패널이 무엇을 하는지 알린다.
+        # "paused" 는 화면 루프가 **실제로 쉬고 있다**는 응답이다. 깃발만
+        # 세우고 곧장 로봇을 움직이면, 화면 루프가 이미 read() 안(spin_once)에
+        # 들어가 있던 경우 그 한 번이 겹친다 — 닫으려던 바로 그 틈이다.
+        busy = {"v": False, "paused": False}
+
+        def pause_screen():
+            """화면 루프가 멈춘 것을 확인하고 돌아온다. 로봇을 움직이기 전에 부른다."""
+            busy["v"] = True
+            for _ in range(40):            # 최대 2초 — 프레임 한 장이면 끝난다
+                if busy["paused"]:
+                    return
+                time.sleep(0.05)
+            self.get_logger().warn(
+                "화면 루프가 멈췄다는 응답이 없습니다 — 그대로 진행합니다")
 
         def set_status(text, sub=""):
             with status_lock:
@@ -3157,7 +3189,7 @@ class BlockSort(Node):
         def _audio_loop():
             try:
                 while not watch["stop"]:
-                    set_status('🎤 "hello rokey" 라고 불러주세요')
+                    set_status(f'🎤 "{vc.WAKE_PHRASE}" 라고 불러주세요')
                     text = vc.listen_once(
                         should_stop=should_stop, on_level=set_level,
                         on_wake=lambda: set_status("🎙️ 듣고 있어요..."))
@@ -3208,13 +3240,24 @@ class BlockSort(Node):
                         set_status(f'들음: "{text}"', "취소됨 — 확인 없음")
                         continue
 
-                    set_status(f"실행 중: {desc}")
-                    for src, zone in steps:
-                        if src == "copy":
-                            self.copy_human(mirror=bool(zone))
-                            continue
-                        if not self.run_one(src, zone):
-                            self.get_logger().warn(f"{sc.describe(src)} → {zone}번 실패")
+                    set_status(f"실행 중: {desc}", "로봇이 움직이는 동안 화면은 멈춥니다")
+                    # **여기서부터 화면 루프를 재운다.** 로봇을 움직이는 것은
+                    # 곧 block_sort 노드를 spin 하는 것이고, 화면 루프는
+                    # sign_frames 노드를 spin 한다 — 둘이 겹치면 rclpy 의
+                    # wait set 이 깨진다(busy 선언부 주석 참고).
+                    # finally 로 반드시 되돌린다: 여기서 예외가 나면(파지 실패,
+                    # 모션 거부) 깃발이 선 채 남아 화면이 영영 멎는다.
+                    pause_screen()          # 멈춘 것을 확인하고 돌아온다
+                    try:
+                        for src, zone in steps:
+                            if src == "copy":
+                                self.copy_human(mirror=bool(zone))
+                                continue
+                            if not self.run_one(src, zone):
+                                self.get_logger().warn(f"{sc.describe(src)} → {zone}번 실패")
+                    finally:
+                        busy["v"] = False
+                        busy["paused"] = False
                     set_status(f"완료: {desc}")
             except Exception as e:
                 # 음성모드가 터져도 작업모드는 살아 있어야 한다 (run_teleop 과 같은 이유).
@@ -3231,6 +3274,18 @@ class BlockSort(Node):
         try:
             cap = rec._camera()
             while not watch["stop"]:
+                if busy["v"]:
+                    # **로봇이 움직이는 중이다 — 카메라를 건드리지 않는다.**
+                    # cap.read() 는 SIGN_SOURCE=ros 일 때 안에서 rclpy.spin_once
+                    # 를 부른다. 지금 배경 스레드가 검출 서비스로 다른 노드를
+                    # spin 하고 있어, 여기서 함께 spin 하면 wait set 이 깨진다
+                    # ("wait set index too big" — busy 선언부 주석 참고).
+                    # 창은 그대로 두고 키 입력만 받는다 — Q 로 빠져나갈 길은
+                    # 열어 둬야 하고, waitKey 는 ROS 와 무관하다.
+                    busy["paused"] = True      # pause_screen() 이 이걸 기다린다
+                    if (cv2.waitKey(30) & 0xFF) == ord("q"):
+                        watch["stop"] = True
+                    continue
                 ok, frame = cap.read()
                 if not ok:
                     continue

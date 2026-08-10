@@ -50,9 +50,61 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 # ── 마이크 설정 ──────────────────────────────────────────────────────
 RECORD_SECONDS = int(os.environ.get("VOICE_RECORD_SEC", 5))
-WAKE_MODEL_PATH = os.environ.get(
+# 웨이크워드 모델. **파일 경로** 또는 **openwakeword 내장 이름** 둘 다 된다.
+#
+#   VOICE_WAKE_MODEL=alexa            내장 (alexa / hey_jarvis / hey_mycroft / hey_rhasspy)
+#   VOICE_WAKE_MODEL=/path/x.tflite   직접 만든 모델
+#
+# 내장을 쓸 수 있게 한 이유 (2026-08-10). hello_rokey 가 이 PC·이 목소리에서
+# 전혀 안 잡혔다. 같은 녹음으로 세 모델을 비교했더니:
+#     hello_rokey_8332_32  최고 0.0013   (합성 잡음 바닥값 0.0009 와 같은 수준)
+#     alexa                최고 0.9312   ← 같은 오디오, 같은 마이크
+#     hey_jarvis           최고 0.0092
+# 즉 특징 추출·마이크·리샘플링은 멀쩡하고(안 그러면 alexa 도 못 터진다),
+# hello_rokey 가 이 발음을 학습하지 않은 것이다. 음량을 ×0.15 까지 낮춰
+# 포화를 없애도 0.0012 로 그대로였다 — 클리핑 문제도 아니었다.
+# 모델 파일 자체는 legacy 두 벌과 md5 가 같아 손상도 아니다.
+#
+# 기본값은 hello_rokey 그대로 둔다 — 팀원 환경에서는 잡히고 있고(오탐을
+# 줄이려 문턱을 올린 커밋이 있다), 기본을 바꾸면 그쪽이 조용히 달라진다.
+WAKE_MODEL = os.environ.get(
     "VOICE_WAKE_MODEL", os.path.join(HERE, "hello_rokey_8332_32.tflite"))
-WAKE_THRESHOLD = float(os.environ.get("VOICE_WAKE_THRESHOLD", 0.4))
+WAKE_MODEL_PATH = WAKE_MODEL          # 예전 이름 (다른 곳에서 참조할 수 있다)
+
+
+def _is_model_file(spec):
+    """파일 경로처럼 보이면 True. 내장 이름("alexa")이면 False."""
+    return os.sep in spec or spec.endswith((".tflite", ".onnx"))
+
+
+def _default_phrase(spec):
+    """모델 이름에서 '부르는 말' 을 만든다. hello_rokey_8332_32 → hello rokey.
+
+    화면 안내문에 쓴다. 모델을 바꾸면 안내도 같이 바뀌어야 한다 — alexa 를
+    쓰면서 "hello rokey 라고 불러주세요" 가 뜨면 아무도 못 부른다.
+    뒤에 붙는 학습 일련번호(8332_32)와 버전(v0.1)은 부를 말이 아니라 뗀다.
+    """
+    base = os.path.basename(spec).split(".")[0] if _is_model_file(spec) else spec
+    words = [w for w in base.split("_") if not w.isdigit() and not w.startswith("v")]
+    return " ".join(words) or base
+
+
+WAKE_PHRASE = os.environ.get("VOICE_WAKE_PHRASE", _default_phrase(WAKE_MODEL))
+# 웨이크워드("hello rokey") 신뢰도 문턱. 넘으면 듣기 시작한다.
+#
+# 0.4 → 0.2 (2026-08-10). 0.4 는 오탐을 줄이려고 0.3 에서 올린 값인데,
+# 그 조정은 **다른 마이크 기준**이었다. 이 PC 는 노트북 내장 DMIC 라
+# 조용한 방에서도 배경 음량이 4~5% 로 깔려 있어(실측) 신뢰도가 그만큼
+# 눌린다 — 0.4 로는 불러도 안 잡혔다.
+#
+# 낮출수록 오탐(옆 대화를 웨이크워드로 오인)이 는다. 다만 음성모드는
+# 웨이크워드만으로 로봇이 움직이지 않는다 — 명령을 해석한 뒤 "실행"이라고
+# 한 번 더 말해야 한다(run_voice 주석). 그래서 오탐의 대가가 '헛되이
+# 5초 녹음' 정도로 작고, 못 잡히는 쪽이 훨씬 답답하다.
+#
+# 헤드셋처럼 입에 가까운 마이크를 쓰면 다시 올리는 게 낫다:
+#   VOICE_WAKE_THRESHOLD=0.4 python3 block_sort.py sign
+WAKE_THRESHOLD = float(os.environ.get("VOICE_WAKE_THRESHOLD", 0.2))
 LEVEL_GAIN = float(os.environ.get("VOICE_LEVEL_GAIN", 6.0))   # 레벨 바 표시용 증폭 배수
 
 # ── 모드 전환·확인 문구 ──────────────────────────────────────────────
@@ -205,13 +257,18 @@ class MicController:
 
 
 class WakeupWord:
-    """legacy/voice_processing/voice_processing/wakeup_word.py 그대로 —
-    모델 경로만 ROS 패키지 share 디렉터리 대신 WAKE_MODEL_PATH를 쓴다.
+    """legacy/voice_processing/voice_processing/wakeup_word.py 에서 확장 —
+    모델을 ROS 패키지 share 대신 WAKE_MODEL 로 찾고, **내장 모델도 받는다.**
     """
 
     def __init__(self, buffer_size):
         self.model = None
-        self.model_name = os.path.basename(WAKE_MODEL_PATH).split(".", 1)[0]
+        # 결과 딕셔너리의 열쇠. **모델을 만든 뒤 모델에게 직접 물어본다**
+        # (set_stream 참고). 예전에는 파일명에서 잘라 추측했는데 —
+        #     hello_rokey_8332_32.tflite → "hello_rokey_8332_32"   맞음
+        #     alexa_v0.1.tflite          → "alexa_v0"  ✗ 실제 키는 "alexa"
+        # 내장 모델을 쓰려는 순간 KeyError 로 죽는다. 추측하지 않는다.
+        self.model_name = None
         self.stream = None
         self.buffer_size = buffer_size
 
@@ -247,12 +304,25 @@ class WakeupWord:
             # 몇 초씩 지연이 낍니다. self 가 _Engine 에 물려 세션 내내
             # 살아있으므로 여기서 한 번 캐싱해두면 그다음부터는 재사용된다.
             from openwakeword.model import Model
-            if not os.path.exists(WAKE_MODEL_PATH):
-                sys.exit(
-                    f"웨이크워드 모델이 없습니다: {WAKE_MODEL_PATH}\n"
+            # **sys.exit 를 쓰지 않는다.** 이 함수는 run_voice() 의 배경
+            # 스레드에서 불린다. SystemExit 은 Exception 이 아니라
+            # BaseException 이라 거기 `except Exception` 에 안 걸리고,
+            # 스레드만 조용히 사라진다 — 화면은 "불러주세요" 를 계속 띄우는데
+            # 실제로는 죽어 있다(2026-08-10 에 이걸로 한참 헤맸다).
+            # 예외로 올려야 부르는 쪽이 로그·대시보드에 남길 수 있다.
+            if _is_model_file(WAKE_MODEL) and not os.path.exists(WAKE_MODEL):
+                raise FileNotFoundError(
+                    f"웨이크워드 모델이 없습니다: {WAKE_MODEL}\n"
                     f"  legacy/voice_processing/resource/hello_rokey_8332_32.tflite 를 "
-                    f"block_sort/ 로 복사하세요.")
-            self.model = Model(wakeword_models=[WAKE_MODEL_PATH])
+                    f"block_sort/ 로 복사하거나, 내장 모델을 쓰세요 "
+                    f"(VOICE_WAKE_MODEL=alexa).")
+            self.model = Model(wakeword_models=[WAKE_MODEL])
+            # **열쇠는 모델에게 물어본다.** 파일명에서 추측하면 내장 모델
+            # (alexa_v0.1.tflite → 키는 "alexa")에서 어긋난다.
+            keys = list(self.model.models.keys())
+            if not keys:
+                raise RuntimeError(f"웨이크워드 모델을 못 읽었습니다: {WAKE_MODEL}")
+            self.model_name = keys[0]
         self.stream = stream
 
 
@@ -339,7 +409,7 @@ class _Engine:
             return None
         try:
             self.wake.set_stream(self.mic.stream)
-            print("웨이크워드 대기 중 ('hello rokey')...")
+            print(f"웨이크워드 대기 중 ('{WAKE_PHRASE}')...")
             while not self.wake.is_wakeup(on_level=on_level):
                 if should_stop is not None and should_stop():
                     return None
@@ -444,7 +514,7 @@ def watch_gui(zones=(1, 2, 3, 4)):
     rec = sc.make_recognizer()
 
     stop = {"v": False}
-    status = {"text": '🎤 "hello rokey" 라고 불러주세요', "sub": "", "level": 0.0}
+    status = {"text": f'🎤 "{WAKE_PHRASE}" 라고 불러주세요', "sub": "", "level": 0.0}
     lock = threading.Lock()
 
     def set_status(text, sub=""):
@@ -457,7 +527,7 @@ def watch_gui(zones=(1, 2, 3, 4)):
 
     def _audio_loop():
         while not stop["v"]:
-            set_status('🎤 "hello rokey" 라고 불러주세요')
+            set_status(f'🎤 "{WAKE_PHRASE}" 라고 불러주세요')
             text = listen_once(should_stop=lambda: stop["v"], on_level=set_level)
             if not text:
                 continue
