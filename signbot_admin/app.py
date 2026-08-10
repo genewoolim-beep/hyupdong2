@@ -540,4 +540,8 @@ def realsense_video_feed():
 if __name__ == "__main__":
     # 개발 서버. 배포 시 gunicorn/uwsgi 등으로 교체하세요.
     # threaded=True 필수 — /video_feed 스트리밍 연결이 다른 API 폴링을 막지 않도록.
-    app.run(host="0.0.0.0", port=5000, debug=True, threaded=True)
+    # use_reloader=False 필수 — 켜져 있으면 reloader 감시 프로세스와 실제 서버가
+    # 별도 PID로 뜬다. run_all.sh 는 launch() 가 잡은 PID(감시 프로세스) 만 죽이므로,
+    # 재시작할 때 이전 실제 서버 자식이 5000 번 포트를 붙든 채 남아 다음 기동이
+    # 조용히 실패하는 원인이 됐다.
+    app.run(host="0.0.0.0", port=5000, debug=True, threaded=True, use_reloader=False)
