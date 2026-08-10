@@ -1,0 +1,274 @@
+<mxfile host="app.diagrams.net" agent="claude-code" version="24.7.5">
+  <diagram id="sysarch2" name="시스템 아키텍처">
+    <mxGraphModel dx="2000" dy="1600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2020" pageHeight="1600" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="pnl_l1" value="① 입력 장치 (Input Devices)" style="rounded=1;arcSize=2;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=14;spacingTop=8;fontSize=14;fontStyle=1;fontColor=#82b366;fillColor=#e6f5e6;strokeColor=#82b366;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="20" y="0" width="1430" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="pnl_l2" value="② 카메라 중계 — ROS2 (인식 파이프라인 입력)" style="rounded=1;arcSize=2;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=14;spacingTop=8;fontSize=14;fontStyle=1;fontColor=#999999;fillColor=#eeeeee;strokeColor=#999999;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="20" y="190" width="1430" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="pnl_l3" value="③ 인식 (Recognition) — 프레임을 기호로 변환" style="rounded=1;arcSize=2;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=14;spacingTop=8;fontSize=14;fontStyle=1;fontColor=#4a9c94;fillColor=#e0f5f3;strokeColor=#4a9c94;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="20" y="400" width="1430" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="pnl_l4" value="④ 해석 / 매핑 (Interpretation &amp;amp; Mapping) — 기호를 로봇 명령으로 변환" style="rounded=1;arcSize=2;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=14;spacingTop=8;fontSize=14;fontStyle=1;fontColor=#6c8ebf;fillColor=#e6ecfa;strokeColor=#6c8ebf;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="20" y="620" width="1430" height="330" as="geometry" />
+        </mxCell>
+        <mxCell id="pnl_l5" value="⑤ 실행 — ROS2 Execution Layer (검출 · 로봇제어)" style="rounded=1;arcSize=2;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=14;spacingTop=8;fontSize=14;fontStyle=1;fontColor=#9673a6;fillColor=#ede4f5;strokeColor=#9673a6;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="20" y="990" width="1430" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="pnl_l6" value="⑥ 로봇 하드웨어" style="rounded=1;arcSize=2;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=14;spacingTop=8;fontSize=14;fontStyle=1;fontColor=#d79b00;fillColor=#fdedd6;strokeColor=#d79b00;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="20" y="1220" width="1430" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="pnl_l7" value="⑦ 관리자 모니터링 — signbot_admin (모든 계층과 개별 통신)" style="rounded=1;arcSize=2;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=14;spacingTop=8;fontSize=14;fontStyle=1;fontColor=#b85450;fillColor=#fbe4e4;strokeColor=#b85450;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="1600" y="190" width="370" height="960" as="geometry" />
+        </mxCell>
+        <mxCell id="in_webcam" value="웹캠&#10;(수어 인식 · 손동작 조종 공용 입력)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="40" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="in_realsense" value="Intel RealSense D435i&#10;(그리퍼 장착 · 로봇 시점 겸 물체 검출용)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="350" y="40" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="in_mic" value="마이크&#10;(음성모드 웨이크워드 + STT)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="640" y="40" width="220" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="in_cli" value="CLI 텍스트 입력" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="890" y="40" width="220" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="l2_webcam_pub" value="webcam_publisher (sign_processing)&#10;ROS2 노드&#10;topic: /webcam/image_raw/compressed" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="230" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="l2_rs_driver" value="realsense2_camera 드라이버 (외부 패키지)&#10;/camera/camera/color/image_raw&#10;/camera/camera/aligned_depth_to_color/image_raw" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="350" y="230" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="l3_sign_rec" value="SignRecognizer (sign_command.py 안)&#10;sign_processing.gesture_recognizer&#10;MediaPipe Hand+Pose → 양방향 GRU&#10;글로스 산출, 확신도 ≥60% (SIGN_CONF)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#c9ece8;strokeColor=#3f8f88;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="440" width="320" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="l3_hand_gest" value="hand_gesture_control.py&#10;(teleop_mode.py가 라이브러리로 import)&#10;MediaPipe GestureRecognizer&#10;양손 랜드마크 + 손모양 분류" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#c9ece8;strokeColor=#3f8f88;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="410" y="440" width="320" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="l3_voice_rec" value="voice_command.py&#10;MicController + WakeupWord(기본 hello_rokey,&#10;VOICE_WAKE_MODEL로 교체 가능) + STT" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#c9ece8;strokeColor=#3f8f88;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="760" y="440" width="290" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="l4_sign_cmd" value="sign_command.py&#10;collect_command() 문장 누적&#10;(명사+동사 가중 VERB_BONUS, 확정 시 즉시 실행)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="660" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="l4_llm" value="command_ready()&#10;LLM 파싱 (OPENAI, gpt-4o) → (색,구역)&#10;키 없음/실패 시 규칙기반 해석으로 폴백" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="400" y="660" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="l4_teleop_logic" value="teleop_mode.py 조종 로직&#10;speedl 20mm/s (TELEOP_SPEED, 축당 고정)&#10;왼손 십자선(xy) · 오른손 z게이지 · 주먹→그리퍼" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="740" y="660" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="l4_voice_norm" value="voice_command.py 정규화&#10;문장 → sign_command 글로스 표기&#10;command_ready() 그대로 재사용" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="660" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="l4_zones_yaml" value="zones.yaml&#10;zones 1~4(로봇, rx·ry·rz 포함) · human_zones 1~4&#10;teach_zones.py 로 생성" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="800" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="l4_teleop_box" value="teleop_box.env&#10;조종 가능 경계 상자 (teach_box.py 생성)&#10;TX_MIN 등 — 판 경계 판정" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="400" y="800" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="l4_calib" value="center_calib.yaml / T_gripper2camera.npy&#10;파지 중심 보정 · 핸드아이 좌표변환" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="740" y="800" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="l4_block_geom" value="block_geom.py (순수 기하, 로봇 無의존)&#10;best_axis · axis_blockers · relocate_step&#10;rotate_tool · fold90 · reorder_for_conflicts&#10;nb_half/nb_lane — 이웃 기울기 반영(2026-08-10)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="800" width="300" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="l5_objdet" value="object_detection 노드&#10;ColorModel(HSV, 기본) / YoloModel&#10;get_3d_position 서비스 (SrvDepthPosition)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1030" width="500" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="l5_blocksort" value="block_sort.py — BlockSort ROS2 노드 (단일 프로세스, DSR 연결 · 그리퍼 · 웹캠 공유)&#10;작업모드 patrol/detect/pick/place · 제어모드 run_teleop() · 음성모드 run_voice()&#10;DSR_ROBOT2 직접 호출(movel/speedl) · onrobot.RG(그리퍼) · T_gripper2camera 좌표변환" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="610" y="1030" width="780" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="l6_doosan" value="Doosan M0609 드라이버&#10;(dsr_bringup2 / dsr_msgs2, 별도 워크스페이스)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="350" y="1260" width="400" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="l6_rg2" value="OnRobot RG2 그리퍼&#10;Modbus TCP 192.168.1.1:502" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="800" y="1260" width="380" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="adm_browser" value="관리자 웹 브라우저&#10;(대시보드 · 제어화면 열람)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1620" y="270" width="320" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="adm_rs_bridge" value="realsense_bridge.py (ROS2, 별도 프로세스)&#10;RealSense 컬러 토픽 구독 → grasp_overlay AR&#10;DSR 연결 불필요 (파지구역 오버레이만)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1620" y="420" width="320" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="adm_flask" value="signbot_admin (Flask, :5000)&#10;&#10;웹  GET / (대시보드) · GET /control (제어화면)&#10;&#10;API  GET/POST /api/mode&#10;GET/POST /api/control/alive&#10;POST /api/zones/&amp;lt;space&amp;gt;&#10;POST /api/robot/status · /api/robot/control&#10;POST /api/debug · /api/hardware&#10;POST /api/frame · /api/frame/control&#10;POST /api/frame/realsense&#10;POST /api/sentence · /api/recognize&#10;&#10;영상  /video_feed · /control_video_feed&#10;/realsense_video_feed" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1620" y="630" width="320" height="500" as="geometry" />
+        </mxCell>
+        <mxCell id="note_legacy" value="참고 — block_sort 파이프라인 밖의 별도 경로&#10;sign_control/sign_demo.py: 수어 녹화·학습용 단독 데모. 여기서만 signbot_admin의 POST /api/sentence, /api/recognize 를 호출한다 (block_sort는 안 씀).&#10;legacy/: 예전 음성 pick&amp;place 원류(voice_pickandplace). sign_processing/get_keyword.py 의 GLOSS_TO_OBJECT={'망치':'hammer'} 는 이 옛 경로용 죽은 참조." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;fontSize=12;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1400" width="1450" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" value="" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="in_webcam" target="l2_webcam_pub">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" value="" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="in_realsense" target="l2_rs_driver">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="오디오 스트림" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.36;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="in_mic" target="l3_voice_rec">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="750" y="370" />
+              <mxPoint x="864.4" y="370" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e4" value="텍스트 명령 → run_one() 직접 호출" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.756;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="in_cli" target="l5_blocksort">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1000" y="370" />
+              <mxPoint x="1430" y="370" />
+              <mxPoint x="1430" y="970" />
+              <mxPoint x="1200" y="970" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e5" value="/webcam/image_raw/compressed (CompressedImage)" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.406;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="l2_webcam_pub" target="l3_sign_rec">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" value="같은 topic, GESTURE_SOURCE=ros" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.15;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="l2_webcam_pub" target="l3_hand_gest">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="99" y="400" />
+              <mxPoint x="570" y="400" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e7" value="color / aligned_depth 토픽 구독" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=1;exitY=0.3;exitDx=0;exitDy=0;entryX=0.48;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="l2_rs_driver" target="l5_objdet">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1480" y="257" />
+              <mxPoint x="1480" y="940" />
+              <mxPoint x="300" y="940" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e26" value="REALSENSE_TOPIC 구독 (모니터링용)" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=1;exitY=0.7;exitDx=0;exitDy=0;entryX=0;entryY=0.45;entryDx=0;entryDy=0;" edge="1" parent="1" source="l2_rs_driver" target="adm_rs_bridge">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1580" y="293" />
+              <mxPoint x="1580" y="470" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e8" value="글로스 스트림 (문자열)" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.533;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="l3_sign_rec" target="l4_sign_cmd">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" value="손동작 벡터 (왼손xy·오른손z·그리퍼)" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.9;exitY=1;exitDx=0;exitDy=0;entryX=0.05;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="l3_hand_gest" target="l4_teleop_logic">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="698" y="605" />
+              <mxPoint x="755" y="605" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e10" value="STT 문장 (텍스트)" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.9;exitY=1;exitDx=0;exitDy=0;entryX=0.05;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="l3_voice_rec" target="l4_voice_norm">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1021" y="625" />
+              <mxPoint x="1095" y="625" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e11" value="글로스 나열 확정" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=1;exitY=0.4;exitDx=0;exitDy=0;entryX=0;entryY=0.4;entryDx=0;entryDy=0;" edge="1" parent="1" source="l4_sign_cmd" target="l4_llm">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e14" value="정규화 글로스 → command_ready() 재사용" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="l4_voice_norm" target="l4_llm">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1230" y="645" />
+              <mxPoint x="550" y="645" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e16" value="TX_MIN 등 경계값 로드" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="l4_teleop_box" target="l4_teleop_logic">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="550" y="780" />
+              <mxPoint x="890" y="780" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e12" value="실행 명령 (색,구역) 또는 (구역,구역)" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.141;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="l4_llm" target="l5_blocksort">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="550" y="765" />
+              <mxPoint x="720" y="765" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e13" value="speedl 벡터 · 그리퍼 open/close" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.3;exitY=1;exitDx=0;exitDy=0;entryX=0.577;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="l4_teleop_logic" target="l5_blocksort">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="830" y="795" />
+              <mxPoint x="1060" y="795" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e15" value="zones/human_zones 좌표 로드" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0.1;entryDx=0;entryDy=0;" edge="1" parent="1" source="l4_zones_yaml" target="l5_blocksort">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="210" y="950" />
+              <mxPoint x="580" y="950" />
+              <mxPoint x="580" y="1040" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e17" value="파지 보정(grasp_offset) · 핸드아이 변환" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.359;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="l4_calib" target="l5_blocksort">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e18" value="best_axis/axis_blockers/relocate_step 호출" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.795;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="l4_block_geom" target="l5_blocksort">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e19" value="get_3d_position 서비스 요청/응답" style="html=1;rounded=0;startArrow=classic;startFill=1;endArrow=classic;endFill=1;fontSize=11;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="l5_objdet" target="l5_blocksort">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e20" value="DR_init · movel/speedl/get_current_posx" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.2;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="l5_blocksort" target="l6_doosan">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="766" y="1180" />
+              <mxPoint x="550" y="1180" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e21" value="open_gripper()/close_gripper() (Modbus)" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="l5_blocksort" target="l6_rg2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1195" y="1195" />
+              <mxPoint x="990" y="1195" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e22" value="POST /api/mode · /control/alive · /zones/* · /robot/status · /debug · /hardware · /frame · /frame/control" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=1;exitY=0.3;exitDx=0;exitDy=0;entryX=0;entryY=0.86;entryDx=0;entryDy=0;" edge="1" parent="1" source="l5_blocksort" target="adm_flask">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e23" value="GET /api/mode, /api/control/alive (0.3~1s 폴링)" style="html=1;rounded=0;endArrow=classic;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;exitX=0;exitY=0.92;exitDx=0;exitDy=0;entryX=1;entryY=0.6;entryDx=0;entryDy=0;" edge="1" parent="1" source="adm_flask" target="l5_blocksort">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e25" value="POST /api/frame/realsense" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.35;exitY=1;exitDx=0;exitDy=0;entryX=0.35;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="adm_rs_bridge" target="adm_flask">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e27" value="" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0;exitY=0.04;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="adm_flask" target="adm_browser">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1610" y="650" />
+              <mxPoint x="1610" y="315" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e27_lbl" value="GET /, /control, /video_feed 등" style="edgeLabel;html=1;align=center;verticalAlign=middle;fontSize=11;labelBackgroundColor=#ffffff;" vertex="1" connectable="0" parent="e27">
+          <mxGeometry x="0.75" y="0" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+        <mxCell id="e28" value="POST /api/sentence, /api/recognize (sign_demo.py 전용, block_sort 밖)" style="html=1;rounded=0;endArrow=classic;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.9;exitY=0;exitDx=0;exitDy=0;entryX=0.9;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="note_legacy" target="adm_flask">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1365" y="1370" />
+              <mxPoint x="1908" y="1370" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

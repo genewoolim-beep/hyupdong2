@@ -1,0 +1,195 @@
+<mxfile host="app.diagrams.net" agent="claude-code" version="24.7.5">
+  <diagram id="opflow1" name="동작 플로우차트">
+    <mxGraphModel dx="1400" dy="1400" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1420" pageHeight="1400" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ===================== SECTION 1: 모드 전환 흐름 ===================== -->
+        <mxCell id="s1_title" value="모드 전환 흐름  (block_sort.py sign 실행 중, 한 프로세스 안에서 전환)" style="text;html=1;align=left;verticalAlign=middle;fontSize=14;fontStyle=1;fontColor=#444444;" vertex="1" parent="1">
+          <mxGeometry x="40" y="14" width="700" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="st_teleop" value="제어모드&#10;손동작 → speedl" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="60" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="st_work" value="작업모드&#10;수어 / 음성 / 텍스트 명령 실행" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="470" y="60" width="240" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="st_voice" value="음성모드&#10;웨이크워드 → STT → &quot;실행&quot; 확인" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="900" y="60" width="240" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="se1" value="gloss=='모드변경'" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0;exitY=0.3;exitDx=0;exitDy=0;entryX=1;entryY=0.3;entryDx=0;entryDy=0;" edge="1" parent="1" source="st_work" target="st_teleop">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="se2" value="why: str" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=1;exitY=0.7;exitDx=0;exitDy=0;entryX=0;entryY=0.7;entryDx=0;entryDy=0;" edge="1" parent="1" source="st_teleop" target="st_work">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="se3" value="mode=='voice'" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=1;exitY=0.3;exitDx=0;exitDy=0;entryX=0;entryY=0.3;entryDx=0;entryDy=0;" edge="1" parent="1" source="st_work" target="st_voice">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="se4" value="mode=='work'" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0;exitY=0.7;exitDx=0;exitDy=0;entryX=1;entryY=0.7;entryDx=0;entryDy=0;" edge="1" parent="1" source="st_voice" target="st_work">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="divider" style="endArrow=none;html=1;strokeColor=#999999;dashed=1;startArrow=none;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="40" y="200" as="sourcePoint" />
+            <mxPoint x="1400" y="200" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ===================== SECTION 2: 작업모드 - 명령 하나 처리 흐름 ===================== -->
+        <mxCell id="s2_title" value="작업모드 안에서: 명령 하나 처리 흐름 (파지 → 배치)" style="text;html=1;align=left;verticalAlign=middle;fontSize=14;fontStyle=1;fontColor=#444444;" vertex="1" parent="1">
+          <mxGeometry x="40" y="216" width="700" height="24" as="geometry" />
+        </mxCell>
+
+        <!-- Main column -->
+        <mxCell id="m1" value="명령 수신&#10;(색, 구역) 또는 (구역, 구역)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="420" y="260" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="m2" value="프리구역에서 대상 검출&#10;(detect_in_zone)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="420" y="360" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="m3" value="대상이 그 자리에&#10;있는가?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="420" y="460" width="240" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="m4" value="옆 블록 살핌&#10;(반경 95mm)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="420" y="600" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="m5" value="두 축 모두&#10;손가락 틈 부족한가?&#10;(양쪽 다 좁음)" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="420" y="700" width="240" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="m6" value="여유 있는 축으로&#10;손목 회전 (±90°) 결정" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="420" y="850" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="m7" value="파지 (그리퍼 닫기)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="420" y="950" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="m8" value="복제(copy) 대상이며&#10;기울기를 적용하는가?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="420" y="1050" width="240" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="m10" value="구역으로 이동 후 배치" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="420" y="1200" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="m11" value="완료&#10;(--admin 이면 대시보드 상태 갱신)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="420" y="1300" width="240" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Left branch: 재탐색 -->
+        <mxCell id="s1" value="재탐색 (최대 2회)&#10;1차: 그 색만, 뒤쪽 경유점부터&#10;2차: 전체 경유점" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="90" y="460" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="s2" value="재탐색으로&#10;발견했는가?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="110" y="600" width="220" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="s3" value="실패 기록 →&#10;다음 명령으로 진행" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="110" y="740" width="220" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Right branch: 이웃 치우기 -->
+        <mxCell id="r1" value="RELOCATE_BLOCKERS&#10;켜짐?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="760" y="700" width="260" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="r2" value="해당 항목 포기&#10;(실패로 남기고 다음으로)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="700" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="r3" value="막는 이웃 탐색·치우기&#10;(최대 2회 재시도)&#10;치운 뒤 목표도 다시 검출(밀렸을 수 있음)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="760" y="850" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="r4" value="치울 자리가&#10;있었는가?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="760" y="960" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="r5" value="실패로 남기고&#10;다음으로 진행" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="960" width="240" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Right branch: 기울기 적용 -->
+        <mxCell id="m9" value="본보기 각도만큼&#10;손목 추가 회전 (COPY_ANGLE)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="1060" width="240" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- Edges: main column -->
+        <mxCell id="f1" value="(color: str, zone: int)" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="m1" target="m2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f2" value="pose: [x,y,z,rx,ry,rz]" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="m2" target="m3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f3" value="예 (pose≠None)" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="m3" target="m4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f4" value="아니오" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="m3" target="s1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f5" value="patrol(skip) &#8594; stock[color]" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="s1" target="s2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f6" value="아니오" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="s2" target="s3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f7" value="예 &#8594; pose" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.75;entryDx=0;entryDy=0;" edge="1" parent="1" source="s2" target="m4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f8" value="nb(x,y,색,기울기) → gap,turn: float" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="m4" target="m5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f9" value="아니오" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="m5" target="m6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f10" value="예" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="m5" target="r1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f11" value="아니오" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.8333;entryDx=0;entryDy=0;" edge="1" parent="1" source="r1" target="r2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f12" value="예" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="r1" target="r3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f13" value="axis_blockers() &#8594; cand" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="r3" target="r4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f14" value="아니오" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.75;entryDx=0;entryDy=0;" edge="1" parent="1" source="r4" target="r5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f15" value="예 &#8594; 재시도" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="r4" target="m4">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="720" y="1005" />
+              <mxPoint x="720" y="630" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="f16" value="pose (회전됨)" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="m6" target="m7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f17" value="grasped(): bool" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="m7" target="m8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f18" value="아니오" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="m8" target="m10">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f19" value="예" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="m8" target="m9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f20" value="rotate_tool() &#8594; pose" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="m9" target="m10">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1200" y="1230" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="f21" value="zone, color, angle" style="html=1;rounded=0;endArrow=classic;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="m10" target="m11">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- 범례 -->
+        <mxCell id="legend2" value="범례:  사각형 = 처리 과정   ·   마름모 = 판단   ·   둥근 사각형(초록) = 시작/성공 종료   ·   둥근 사각형(빨강) = 실패 종료" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1390" width="900" height="20" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

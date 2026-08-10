@@ -1,0 +1,15 @@
+.git/
+docs/
+legacy/
+.vscode/
+.claude/
+**/__pycache__/
+**/*.pyc
+build/
+install/
+log/
+*.bag
+rosbag2_*/
+.env
+*.env
+!hand_gesture_control/teleop_box.env
