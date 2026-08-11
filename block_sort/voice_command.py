@@ -49,7 +49,20 @@ from dataclasses import dataclass
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # ── 마이크 설정 ──────────────────────────────────────────────────────
-RECORD_SECONDS = int(os.environ.get("VOICE_RECORD_SEC", 5))
+# 명령 한 문장을 받는 녹음 길이(초). 웨이크워드 뒤에 이만큼 통째로 녹음해서
+# Whisper 에 보낸다 — 말이 끝난 걸 감지하는 게 아니라 **고정 길이**다.
+#
+# **5 → 10 (2026-08-11).** 5초로는 짝이 여럿인 명령이 잘렸다. 실기에서 쓰는
+# 문장이 '노랑 1번구역 파랑 2번구역 보라 3번구역' 처럼 색·구역을 세 짝까지
+# 이어 말하는 형태라(로그 python3_250427), 한 짝에 3초쯤 잡으면 5초로는
+# 두 짝도 안 들어간다. 짧게 말하면 남은 시간은 조용히 흘러갈 뿐이라
+# (그만큼 기다린다) 잘리는 쪽보다 낫다.
+RECORD_SECONDS = int(os.environ.get("VOICE_RECORD_SEC", 10))
+# 확인("실행") 한 마디를 받는 녹음 길이(초). **명령과 따로 둔다.**
+# 예전에는 둘이 같은 값이라, 한 마디 대답하는 데도 명령과 같은 시간을 기다렸다.
+# 게다가 이 녹음은 CONFIRM_TIMEOUT_SEC(8초) 안에 끝나야 한다 — 명령 쪽을
+# 10초로 올릴 때 이것까지 따라 올라가면 확인이 시간 안에 안 끝난다.
+CONFIRM_RECORD_SECONDS = int(os.environ.get("VOICE_CONFIRM_RECORD_SEC", 5))
 # 웨이크워드 모델. **파일 경로** 또는 **openwakeword 내장 이름** 둘 다 된다.
 #
 #   VOICE_WAKE_MODEL=alexa            내장 (alexa / hey_jarvis / hey_mycroft / hey_rhasspy)
@@ -341,11 +354,17 @@ class STT:
         self.duration = RECORD_SECONDS
         self.samplerate = 16000   # Whisper는 16kHz를 선호
 
-    def speech2text(self):
+    def speech2text(self, seconds=None):
+        """seconds 를 주면 그 길이로 녹음한다 (안 주면 명령용 RECORD_SECONDS).
+
+        확인("실행") 단계는 한 마디면 되고 CONFIRM_TIMEOUT_SEC 안에 끝나야 해서
+        더 짧게 부른다 — RECORD_SECONDS 주석 참고.
+        """
         import sounddevice as sd
         import scipy.io.wavfile as wav
-        print(f"음성 녹음을 시작합니다. {self.duration}초 동안 말해주세요...")
-        audio = sd.rec(int(self.duration * self.samplerate),
+        dur = self.duration if seconds is None else seconds
+        print(f"음성 녹음을 시작합니다. {dur}초 동안 말해주세요...")
+        audio = sd.rec(int(dur * self.samplerate),
                        samplerate=self.samplerate, channels=1, dtype='int16')
         sd.wait()
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -400,7 +419,9 @@ class _Engine:
         실사용에서 계속 타임아웃으로 취소되는 문제가 있었다.
         """
         if not require_wake:
-            return self.stt.speech2text()
+            # 확인 단계 — 한 마디만 받는다. 명령 녹음(10초)을 그대로 쓰면
+            # CONFIRM_TIMEOUT_SEC(8초) 을 넘겨 확인이 늘 시간 초과가 된다.
+            return self.stt.speech2text(CONFIRM_RECORD_SECONDS)
 
         try:
             self.mic.open_stream()
