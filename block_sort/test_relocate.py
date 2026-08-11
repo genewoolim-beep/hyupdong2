@@ -333,3 +333,66 @@ assert ds24, "노란색은 끌 자리가 있어야 한다"
 for d in ds24:
     assert approach_gap(REAL_G, 91.0, [d]) >= FINGER_T
 print(f"25 그 노란색은 직각 60mm 끌기로 풀린다 ({len(ds24)}방향 가능)")
+
+
+# ── 26. 십자 배치는 **한 번만 끌면** 열린다 (2026-08-11 로그 python3_5769) ──
+#     보라색이 왼쪽·왼쪽위·위·오른쪽으로 둘러싸이고 아래만 비어 있었다.
+#     "한쪽을 밀어 최소한의 움직임으로 축을 만들고 집는다" 가 되어야 할 배치인데,
+#     실기는 블록을 하나 끌고도 못 열었다. 축을 **틈 크기로만** 골랐기 때문이다:
+#       세로축(90°)  막는 것 1개  틈 14mm   ← 한 번 끌면 끝난다
+#       가로축( 0°)  막는 것 3개  틈  2mm   ← 하나를 치워도 둘이 남는다
+#     세로축을 먼저 잡은 것까지는 맞았는데, 그 하나를 집는 데 실패하자 가로축으로
+#     넘어가 3개 중 하나(주황 614,-120)를 (614,-60)으로 끌었다 — 축은 그대로
+#     막혀 있었고, 그 끌어 놓은 블록에 팔이 부딪혔다.
+CROSS_T = (564.0, -121.0)                     # 집으려던 보라색
+CROSS = {"빨간색": (513.0, -119.0), "주황A": (527.0, -105.0),
+         "주황B": (564.0, -72.0), "주황C": (614.0, -120.0)}
+cross_pts = list(CROSS.values())
+
+# (a) 두 축의 막는 개수 — 새 규칙이 보는 값
+n_vert = len(axis_blockers(CROSS_T, 90.0, cross_pts))
+n_horz = len(axis_blockers(CROSS_T, 0.0, cross_pts))
+assert (n_vert, n_horz) == (1, 3), (n_vert, n_horz)
+g_vert = approach_gap(CROSS_T, 90.0, cross_pts)
+g_horz = approach_gap(CROSS_T, 0.0, cross_pts)
+assert g_vert < FINGER_T and g_horz < FINGER_T      # 손목만으로는 못 연다
+print(f"26a 십자 배치 — 세로축 {n_vert}개(틈 {g_vert:.0f}mm) / "
+      f"가로축 {n_horz}개(틈 {g_horz:.0f}mm)")
+
+# (b) 축은 세로로 잡힌다 (틈으로 골라도 개수로 골라도 같은 답)
+from block_geom import axis_order  # noqa: E402
+
+turn_c, gap_c, _ = best_axis(CROSS_T, 0.0, cross_pts)
+assert (0.0 + turn_c) % 180 == 90.0, turn_c
+order_c = axis_order(CROSS_T, 0.0 + turn_c, cross_pts)
+assert [(d % 180, n) for d, n in order_c] == [(90.0, 1), (0.0, 3)], order_c
+# 틈으로 고른 축이 개수가 많은 쪽이었어도 개수 적은 쪽이 앞으로 온다
+flipped = axis_order(CROSS_T, 0.0, cross_pts)
+assert flipped[0][0] % 180 == 90.0 and flipped[0][1] == 1, flipped
+blk = axis_blockers(CROSS_T, 90.0, cross_pts)[0][0]
+assert abs(blk[0] - 564.0) < 1 and abs(blk[1] + 72.0) < 1, blk
+print(f"26b 세로축을 고르고, 막는 것은 주황B({blk[0]:.0f},{blk[1]:.0f}) 하나뿐")
+
+# (c) 그 하나를 끌면 **한 번에** 열린다 — 원하던 "최소한의 움직임"
+dests = slide_dests(CROSS_T, CROSS["주황B"], 90.0,
+                    others=[v for k, v in CROSS.items() if k != "주황B"])
+assert dests, "주황B 는 끌 자리가 있어야 한다"
+for d in dests:
+    rest = [v for k, v in CROSS.items() if k != "주황B"] + [d]
+    assert approach_gap(CROSS_T, 90.0, rest) >= FINGER_T, (d, rest)
+print(f"26c 주황B 를 {SLIDE_MM:.0f}mm 끌면({len(dests)}방향) 세로축이 열린다 — 이동 1회")
+
+# (d) 그 주황B 자신은 집을 수 있다 (기하로는 막는 것이 목표뿐)
+nb_of_b = [p for p in cross_pts + [CROSS_T]
+           if p != CROSS["주황B"]
+           and np.hypot(p[0] - CROSS["주황B"][0], p[1] - CROSS["주황B"][1]) < 95.0]
+assert approach_gap(CROSS["주황B"], 0.0, nb_of_b) >= FINGER_T
+print("26d 주황B 는 가로축이 뻥 뚫려 있어 집을 수 있다 (기하 판정)")
+
+# (e) 실기가 한 그 이동은 헛수고였다 — 가로축은 여전히 막혀 있다
+after_oc = [CROSS["빨간색"], CROSS["주황A"], CROSS["주황B"], (614.0, -60.0)]
+assert approach_gap(CROSS_T, 0.0, after_oc) < FINGER_T
+left = axis_blockers(CROSS_T, 0.0, after_oc)
+assert len(left) == 2, left
+print(f"26e 가로축의 주황C 를 (614,-60)으로 끌어도 {len(left)}개가 남아 안 열린다 "
+      f"— 개수를 안 보면 이 헛수고를 또 한다")
