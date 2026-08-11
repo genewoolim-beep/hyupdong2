@@ -14,14 +14,21 @@
         <span class="dot"></span>
         <span id="modeText">{{ mode_label.get(mode.mode, mode.mode) }}</span>
       </div>
-      {# 음성모드 버튼 — 두 화면 어디서나 눌러야 하므로 navbar(base.html)에 둔다.
-         한 번에 하나만 보인다: work면 진입 버튼, voice면 복귀 버튼 (dashboard.js
-         의 renderMode가 style.display로 전환한다). control 모드 중엔 둘 다
-         숨긴다 — 그때는 애초에 음성모드로 못 들어간다(모드가 배타적이므로). #}
+      {# 모드 버튼 — 두 화면 어디서나 눌러야 하므로 navbar(base.html)에 둔다.
+         한 번에 하나만 보인다 (dashboard.js 의 renderMode가 style.display로 전환).
+           work    → "음성모드 진입"
+           voice   → "작업모드로 복귀"
+           control → "작업모드로 복귀"
+         **제어모드에서도 복귀 버튼이 보여야 한다.** 진입 버튼만 숨기면 된다
+         (제어모드에서 음성모드로 바로 못 넘어가는 것은 맞다). 복귀는 로봇 쪽이
+         이미 지원한다 — run_teleop 의 _watch 가 /api/mode 를 1초마다 보고
+         work 로 바뀌면 조종을 끝낸다. 조종창 안내문도 "돌아오는 방법 셋:
+         양손 3초 펴기 / 조종창 Q / 대시보드에서 작업모드 전환" 이라고 말한다.
+         그런데 이 버튼이 숨어 있어서 **그 셋째 길이 화면에 없었다.** #}
       <button class="btn btn-secondary btn-nav" id="btnVoiceModeEnter"
               style="display: {{ 'none' if mode.mode != 'work' else '' }}">음성모드 진입</button>
       <button class="btn btn-secondary btn-nav" id="btnVoiceModeExit"
-              style="display: {{ '' if mode.mode == 'voice' else 'none' }}">작업모드로 복귀</button>
+              style="display: {{ '' if mode.mode in ('voice', 'control') else 'none' }}">작업모드로 복귀</button>
       <div class="status-pill{{ '' if robot.connected else ' offline' }}" id="robotStatusPill">
         <span class="dot"></span>
         <span id="robotStatusText">{{ '로봇 연결됨' if robot.connected else '로봇 연결 끊김' }}</span>

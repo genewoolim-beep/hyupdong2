@@ -124,12 +124,18 @@
     const updatedAt = document.getElementById("modeUpdatedAt");
     if (updatedAt) updatedAt.textContent = data.updated_at;
 
-    // 음성모드 버튼은 지금 모드에 맞는 쪽만 보인다 — work 면 "음성모드 진입",
-    // voice 면 "작업모드로 복귀". 둘 다 있으면 헷갈리므로 하나만 남긴다.
+    // 모드 버튼은 지금 모드에 맞는 쪽만 보인다 — work 면 "음성모드 진입",
+    // voice/control 이면 "작업모드로 복귀". 둘 다 있으면 헷갈리므로 하나만 남긴다.
+    // **제어모드에서도 복귀 버튼을 보여준다** — 조종창이 안내하는 세 가지 복귀
+    // 방법 중 하나가 "대시보드에서 작업모드 전환" 인데, 예전에는 그 버튼이
+    // 숨어 있어서 화면에서 돌아올 길이 없었다 (base.html 주석 참고).
     const enterBtn = document.getElementById("btnVoiceModeEnter");
     const exitBtn = document.getElementById("btnVoiceModeExit");
     if (enterBtn) enterBtn.style.display = data.mode === "work" ? "" : "none";
-    if (exitBtn) exitBtn.style.display = data.mode === "voice" ? "" : "none";
+    if (exitBtn) {
+      exitBtn.style.display =
+        data.mode === "voice" || data.mode === "control" ? "" : "none";
+    }
 
     // 모드가 실제로 전환된 순간에만, 그 모드에 맞는 화면으로 자동 이동한다.
     // (매 폴링마다 같은 값이 와도 리다이렉트하면 안 되므로 이전 값과 비교한다.)
